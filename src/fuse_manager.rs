@@ -1,7 +1,7 @@
 /// Hardware Fuse Management System
 /// Controls fuse programming, reading, and verification
 
-use crate::shadow_register::{ShadowRegister, ShadowRegisterBank};
+use crate::shadow_register::ShadowRegisterBank;
 use core::ptr::{read_volatile, write_volatile};
 
 /// Fuse Programming State
@@ -170,7 +170,7 @@ impl HardwareFuse {
     #[inline]
     fn calculate_ecc(&self, data: u64) -> u16 {
         let mut ecc: u16 = 0;
-        let mut temp = data;
+        let temp = data;
 
         // Simple parity-based ECC (8 parity bits)
         for i in 0..8 {
