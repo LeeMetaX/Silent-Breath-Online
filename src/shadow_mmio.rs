@@ -285,14 +285,14 @@ impl ShadowMMIOController {
 
     /// Get register state via MMIO
     #[inline]
-    pub unsafe fn mmio_get_state(&self, register_id: u8) -> Result<RegisterState, &'static str> {
+    pub unsafe fn mmio_get_state(&self, _register_id: u8) -> Result<RegisterState, &'static str> {
         let mmio = &*self.mmio;
         Ok(mmio.get_state())
     }
 
     /// Get register version via MMIO
     #[inline]
-    pub unsafe fn mmio_get_version(&self, register_id: u8) -> Result<u8, &'static str> {
+    pub unsafe fn mmio_get_version(&self, _register_id: u8) -> Result<u8, &'static str> {
         let mmio = &*self.mmio;
         Ok(mmio.get_version())
     }

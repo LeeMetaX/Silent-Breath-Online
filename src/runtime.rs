@@ -4,6 +4,7 @@
 use crate::cache_coherency::{CacheLine, CacheState, L3Directory};
 use crate::mmio::{MMIOCoherency, COHERENCY_CTL_BASE};
 use crate::state_machine::{CacheEvent, CoherencyStateMachine};
+use alloc::boxed::Box;
 
 /// Per-Core Cache Controller
 pub struct CoreCacheController {

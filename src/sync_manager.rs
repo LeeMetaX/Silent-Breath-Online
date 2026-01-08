@@ -2,7 +2,7 @@
 /// Handles synchronization between shadow registers, fuses, and active hardware
 
 use crate::fuse_manager::FuseManager;
-use crate::shadow_register::{RegisterState, ShadowRegister};
+use crate::shadow_register::RegisterState;
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 /// Synchronization Direction

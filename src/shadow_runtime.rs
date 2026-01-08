@@ -86,7 +86,7 @@ impl ShadowRegisterRuntime {
     pub fn write(&mut self, register_id: u32, value: u64) -> Result<(), &'static str> {
         if let Some(reg) = self.shadow_bank.get_register_mut(register_id) {
             // Encode with ECC
-            let (_encoded_value, ecc) = self.ecc_manager.encode_u64(value);
+            let (_encoded_value, _ecc) = self.ecc_manager.encode_u64(value);
 
             // Write to register
             reg.write(value)?;
@@ -258,7 +258,7 @@ impl VersionedShadowRuntime {
 /// FFI interface for C integration
 #[no_mangle]
 pub unsafe extern "C" fn shadow_runtime_init() -> *mut ShadowRegisterRuntime {
-    let mut runtime = Box::leak(Box::new(ShadowRegisterRuntime::new()));
+    let runtime = Box::leak(Box::new(ShadowRegisterRuntime::new()));
     runtime.init();
     runtime as *mut ShadowRegisterRuntime
 }

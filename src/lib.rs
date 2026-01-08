@@ -1,5 +1,4 @@
 #![no_std]
-#![feature(const_mut_refs)]
 
 extern crate alloc;
 

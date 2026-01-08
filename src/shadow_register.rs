@@ -313,3 +313,228 @@ impl ShadowRegisterBank {
         self.count
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_shadow_register_initialization() {
+        let reg = ShadowRegister::new(1, 0x1000);
+        assert_eq!(reg.get_state(), RegisterState::Uninitialized);
+        assert_eq!(reg.read(), 0);
+        assert_eq!(reg.get_version(), 0);
+    }
+
+    #[test]
+    fn test_shadow_register_write() {
+        let reg = ShadowRegister::new(1, 0x1000);
+
+        // Write to shadow register
+        assert!(reg.write(0xDEADBEEF).is_ok());
+        assert_eq!(reg.get_state(), RegisterState::Modified);
+        assert_eq!(reg.get_version(), 1);
+    }
+
+    #[test]
+    fn test_shadow_register_read_after_commit() {
+        let mut reg = ShadowRegister::new(1, 0x1000);
+        reg.write(0x12345678).unwrap();
+        reg.commit().unwrap();
+
+        assert_eq!(reg.read(), 0x12345678);
+    }
+
+    #[test]
+    fn test_shadow_register_commit() {
+        let mut reg = ShadowRegister::new(1, 0x1000);
+
+        // Write and commit
+        reg.write(0xCAFEBABE).unwrap();
+        assert!(reg.commit().is_ok());
+
+        assert_eq!(reg.read(), 0xCAFEBABE);
+        assert_eq!(reg.get_state(), RegisterState::Committed);
+    }
+
+    #[test]
+    fn test_shadow_register_rollback() {
+        let mut reg = ShadowRegister::new(1, 0x1000);
+
+        // Write and commit to set backup value
+        reg.write(0x1111).unwrap();
+        reg.commit().unwrap();
+
+        // Backup now contains 0 (value before first commit)
+        // Write again and commit to establish new value
+        reg.write(0x2222).unwrap();
+        reg.commit().unwrap();
+
+        // Backup now contains 0x1111
+        // Write one more time without committing
+        reg.write(0x3333).unwrap();
+
+        // Rollback should restore to backup value (0x1111)
+        assert!(reg.rollback().is_ok());
+        assert_eq!(reg.read(), 0x1111);
+        assert_eq!(reg.get_state(), RegisterState::Committed);
+    }
+
+    #[test]
+    fn test_shadow_register_lock() {
+        let mut reg = ShadowRegister::new(1, 0x1000);
+        reg.write(0x5555).unwrap();
+
+        // Lock the register
+        reg.lock();
+        assert_eq!(reg.get_state(), RegisterState::Locked);
+
+        // Write should fail when locked
+        assert!(reg.write(0x6666).is_err());
+
+        // Unlock and write should succeed
+        reg.unlock();
+        assert!(reg.write(0x7777).is_ok());
+    }
+
+    #[test]
+    fn test_shadow_register_checksum() {
+        let mut reg = ShadowRegister::new(1, 0x1000);
+        reg.write(0xABCDEF00).unwrap();
+        reg.commit().unwrap();
+
+        // Checksum should be valid after commit
+        assert!(reg.verify());
+    }
+
+    #[test]
+    fn test_register_state_from_u8() {
+        assert_eq!(RegisterState::from(0), RegisterState::Uninitialized);
+        assert_eq!(RegisterState::from(1), RegisterState::Loaded);
+        assert_eq!(RegisterState::from(2), RegisterState::Modified);
+        assert_eq!(RegisterState::from(3), RegisterState::Committed);
+        assert_eq!(RegisterState::from(4), RegisterState::Locked);
+        assert_eq!(RegisterState::from(5), RegisterState::Error);
+        assert_eq!(RegisterState::from(99), RegisterState::Error);
+    }
+
+    #[test]
+    fn test_shadow_register_bank_initialization() {
+        let bank = ShadowRegisterBank::new();
+        assert_eq!(bank.count(), 0);
+    }
+
+    #[test]
+    fn test_shadow_register_bank_add_register() {
+        let mut bank = ShadowRegisterBank::new();
+
+        // Add first register
+        assert!(bank.add_register(1, 0x1000).is_ok());
+        assert_eq!(bank.count(), 1);
+
+        // Add second register
+        assert!(bank.add_register(2, 0x2000).is_ok());
+        assert_eq!(bank.count(), 2);
+
+        // Check we can retrieve them
+        assert!(bank.get_register(1).is_some());
+        assert!(bank.get_register(2).is_some());
+        assert!(bank.get_register(3).is_none());
+    }
+
+    #[test]
+    fn test_shadow_register_bank_full() {
+        let mut bank = ShadowRegisterBank::new();
+
+        // Fill the bank to capacity (256 registers)
+        for i in 0..256 {
+            assert!(bank.add_register(i as u32, i as u64 * 0x1000).is_ok());
+        }
+
+        // Should fail when full
+        assert!(bank.add_register(256, 0x100000).is_err());
+    }
+
+    #[test]
+    fn test_shadow_register_bank_get_register() {
+        let mut bank = ShadowRegisterBank::new();
+        bank.add_register(42, 0xCAFE).unwrap();
+
+        let reg = bank.get_register(42);
+        assert!(reg.is_some());
+    }
+
+    #[test]
+    fn test_shadow_register_bank_get_register_mut() {
+        let mut bank = ShadowRegisterBank::new();
+        bank.add_register(10, 0x1000).unwrap();
+
+        {
+            let reg = bank.get_register_mut(10).unwrap();
+            reg.write(0xBEEF).unwrap();
+            reg.commit().unwrap();
+        }
+
+        let reg_read = bank.get_register(10).unwrap();
+        assert_eq!(reg_read.read(), 0xBEEF);
+    }
+
+    #[test]
+    fn test_shadow_register_bank_verify_all() {
+        let mut bank = ShadowRegisterBank::new();
+        bank.add_register(1, 0x1000).unwrap();
+        bank.add_register(2, 0x2000).unwrap();
+
+        // Write and commit both registers (commit calculates checksums)
+        bank.get_register_mut(1).unwrap().write(0x1111).unwrap();
+        bank.get_register_mut(1).unwrap().commit().unwrap();
+        bank.get_register_mut(2).unwrap().write(0x2222).unwrap();
+        bank.get_register_mut(2).unwrap().commit().unwrap();
+
+        // All should verify
+        assert!(bank.verify_all());
+    }
+
+    #[test]
+    fn test_shadow_register_bank_commit_all() {
+        let mut bank = ShadowRegisterBank::new();
+        bank.add_register(1, 0x1000).unwrap();
+        bank.add_register(2, 0x2000).unwrap();
+
+        // Write to both
+        bank.get_register_mut(1).unwrap().write(0xAAAA).unwrap();
+        bank.get_register_mut(2).unwrap().write(0xBBBB).unwrap();
+
+        // Commit all
+        let committed = bank.commit_all().unwrap();
+        assert_eq!(committed, 2);
+
+        // Check states
+        assert_eq!(bank.get_register(1).unwrap().get_state(), RegisterState::Committed);
+        assert_eq!(bank.get_register(2).unwrap().get_state(), RegisterState::Committed);
+    }
+
+    #[test]
+    fn test_shadow_register_version_increment() {
+        let mut reg = ShadowRegister::new(1, 0x1000);
+
+        assert_eq!(reg.get_version(), 0);
+
+        // Each write increments version
+        reg.write(0x1).unwrap();
+        assert_eq!(reg.get_version(), 1);
+
+        reg.write(0x2).unwrap();
+        assert_eq!(reg.get_version(), 2);
+
+        // Commit doesn't change version
+        reg.commit().unwrap();
+        assert_eq!(reg.get_version(), 2);
+
+        // Rollback decrements version
+        reg.write(0x3).unwrap();
+        assert_eq!(reg.get_version(), 3);
+        reg.rollback().unwrap();
+        assert_eq!(reg.get_version(), 2);
+    }
+}
