@@ -1,0 +1,17 @@
+[package]
+name = "silent-breath-mmio"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# No std for bare-metal firmware replacement
+# We'll use core and alloc only
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+
+[lib]
+name = "silent_breath_mmio"
+path = "src/lib.rs"
