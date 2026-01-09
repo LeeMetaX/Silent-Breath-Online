@@ -345,3 +345,184 @@ impl FuseManager {
         &mut self.shadow_bank
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_fuse_manager_initialization() {
+        let manager = FuseManager::new();
+        assert_eq!(manager.count(), 0);
+    }
+
+    #[test]
+    fn test_add_fuse_otp() {
+        let mut manager = FuseManager::new();
+
+        // Add OTP fuse
+        let result = manager.add_fuse(0x1000, FuseMode::OTP);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 0);
+        assert_eq!(manager.count(), 1);
+
+        // Verify fuse was added correctly
+        let fuse = manager.get_fuse(0);
+        assert!(fuse.is_some());
+        assert!(fuse.unwrap().is_virgin());
+    }
+
+    #[test]
+    fn test_add_fuse_mtp() {
+        let mut manager = FuseManager::new();
+
+        // Add MTP fuse
+        let result = manager.add_fuse(0x2000, FuseMode::MTP);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 0);
+        assert_eq!(manager.count(), 1);
+    }
+
+    #[test]
+    fn test_add_fuse_eeprom() {
+        let mut manager = FuseManager::new();
+
+        // Add EEPROM fuse
+        let result = manager.add_fuse(0x3000, FuseMode::EEPROM);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 0);
+        assert_eq!(manager.count(), 1);
+    }
+
+    #[test]
+    fn test_add_multiple_fuses() {
+        let mut manager = FuseManager::new();
+
+        // Add multiple fuses
+        assert_eq!(manager.add_fuse(0x1000, FuseMode::OTP).unwrap(), 0);
+        assert_eq!(manager.add_fuse(0x2000, FuseMode::MTP).unwrap(), 1);
+        assert_eq!(manager.add_fuse(0x3000, FuseMode::EEPROM).unwrap(), 2);
+        assert_eq!(manager.count(), 3);
+    }
+
+    #[test]
+    fn test_fuse_manager_full() {
+        let mut manager = FuseManager::new();
+
+        // Fill the manager to capacity (128 fuses)
+        for i in 0..128 {
+            let result = manager.add_fuse(i as u64 * 0x1000, FuseMode::OTP);
+            assert!(result.is_ok());
+        }
+
+        // Should fail when full
+        let result = manager.add_fuse(0x100000, FuseMode::OTP);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "Fuse manager is full");
+    }
+
+    #[test]
+    fn test_get_fuse() {
+        let mut manager = FuseManager::new();
+        manager.add_fuse(0x1000, FuseMode::OTP).unwrap();
+
+        // Get valid fuse
+        let fuse = manager.get_fuse(0);
+        assert!(fuse.is_some());
+
+        // Get invalid fuse
+        let fuse = manager.get_fuse(1);
+        assert!(fuse.is_none());
+    }
+
+    #[test]
+    fn test_get_fuse_mut() {
+        let mut manager = FuseManager::new();
+        manager.add_fuse(0x1000, FuseMode::OTP).unwrap();
+
+        // Get mutable fuse
+        let fuse = manager.get_fuse_mut(0);
+        assert!(fuse.is_some());
+
+        // Verify state
+        assert_eq!(fuse.unwrap().get_state(), FuseState::Virgin);
+    }
+
+    #[test]
+    fn test_hardware_fuse_initialization() {
+        let fuse = HardwareFuse::new(0x1000, FuseMode::OTP);
+        assert_eq!(fuse.get_state(), FuseState::Virgin);
+        assert_eq!(fuse.get_value(), 0);
+        assert!(!fuse.is_locked());
+        assert!(fuse.is_virgin());
+    }
+
+    #[test]
+    fn test_fuse_blow() {
+        let mut manager = FuseManager::new();
+        manager.add_fuse(0x1000, FuseMode::OTP).unwrap();
+
+        let fuse = manager.get_fuse_mut(0).unwrap();
+
+        // Can't blow virgin fuse
+        let result = fuse.blow();
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "Can only blow programmed fuses");
+    }
+
+    #[test]
+    fn test_verify_all_empty() {
+        let manager = FuseManager::new();
+
+        // Empty manager should verify successfully
+        assert!(manager.verify_all());
+    }
+
+    #[test]
+    fn test_verify_all_with_fuses() {
+        let mut manager = FuseManager::new();
+        manager.add_fuse(0x1000, FuseMode::OTP).unwrap();
+        manager.add_fuse(0x2000, FuseMode::MTP).unwrap();
+
+        // Commit shadow registers to establish valid CRCs
+        let shadow_bank = manager.get_shadow_bank_mut();
+        shadow_bank.get_register_mut(0).unwrap().write(0).unwrap();
+        shadow_bank.get_register_mut(0).unwrap().commit().unwrap();
+        shadow_bank.get_register_mut(1).unwrap().write(0).unwrap();
+        shadow_bank.get_register_mut(1).unwrap().commit().unwrap();
+
+        // All fuses should verify (virgin state matches shadow)
+        assert!(manager.verify_all());
+    }
+
+    #[test]
+    fn test_fuse_state_transitions() {
+        let fuse = HardwareFuse::new(0x1000, FuseMode::OTP);
+
+        // Initial state
+        assert_eq!(fuse.get_state(), FuseState::Virgin);
+        assert!(fuse.is_virgin());
+        assert!(!fuse.is_locked());
+    }
+
+    #[test]
+    fn test_shadow_bank_integration() {
+        let manager = FuseManager::new();
+        let shadow_bank = manager.get_shadow_bank();
+
+        // Shadow bank should be empty initially
+        assert_eq!(shadow_bank.count(), 0);
+    }
+
+    #[test]
+    fn test_shadow_bank_integration_with_fuses() {
+        let mut manager = FuseManager::new();
+        manager.add_fuse(0x1000, FuseMode::OTP).unwrap();
+        manager.add_fuse(0x2000, FuseMode::MTP).unwrap();
+
+        let shadow_bank = manager.get_shadow_bank();
+
+        // Shadow bank should have same count as fuses
+        assert_eq!(shadow_bank.count(), 2);
+    }
+}

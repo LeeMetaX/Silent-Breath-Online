@@ -252,6 +252,11 @@ impl ShadowRegisterBank {
         Ok(index)
     }
 
+    /// Get number of active registers
+    pub fn get_register_count(&self) -> usize {
+        self.count
+    }
+
     /// Get register by ID
     pub fn get_register(&self, id: u32) -> Option<&ShadowRegister> {
         self.registers[..self.count]
