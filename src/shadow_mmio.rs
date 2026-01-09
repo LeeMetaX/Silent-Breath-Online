@@ -341,3 +341,321 @@ unsafe impl Sync for ShadowMMIOController {}
 // Vec implementation for no_std
 extern crate alloc;
 use alloc::vec::Vec;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::boxed::Box;
+
+    /// Helper: Create simulated shadow MMIO register in memory
+    fn create_mock_shadow_register() -> Box<ShadowRegisterMMIO> {
+        Box::new(ShadowRegisterMMIO {
+            control: 0,
+            data: 0,
+            address: 0,
+            status: 0,
+            ecc: 0,
+        })
+    }
+
+    #[test]
+    fn test_shadow_register_mmio_control_read_write() {
+        let mut reg = create_mock_shadow_register();
+
+        unsafe {
+            reg.write_control(0x12345678);
+            let val = reg.read_control();
+            assert_eq!(val, 0x12345678);
+        }
+    }
+
+    #[test]
+    fn test_shadow_register_mmio_data_read_write() {
+        let mut reg = create_mock_shadow_register();
+
+        unsafe {
+            reg.write_data(0xDEADBEEFCAFEBABE);
+            let val = reg.read_data();
+            assert_eq!(val, 0xDEADBEEFCAFEBABE);
+        }
+    }
+
+    #[test]
+    fn test_shadow_register_mmio_status_busy() {
+        let mut reg = create_mock_shadow_register();
+
+        unsafe {
+            // Not busy initially
+            reg.status = 0;
+            assert!(!reg.is_busy());
+
+            // Set busy bit
+            reg.status = 0x1;
+            assert!(reg.is_busy());
+
+            // Clear busy bit
+            reg.status = 0x0;
+            assert!(!reg.is_busy());
+        }
+    }
+
+    #[test]
+    fn test_shadow_register_mmio_status_error() {
+        let mut reg = create_mock_shadow_register();
+
+        unsafe {
+            // No error initially
+            reg.status = 0;
+            assert!(!reg.has_error());
+
+            // Set error bit (bit 1)
+            reg.status = 0x2;
+            assert!(reg.has_error());
+
+            // Both busy and error
+            reg.status = 0x3;
+            assert!(reg.is_busy());
+            assert!(reg.has_error());
+        }
+    }
+
+    #[test]
+    fn test_shadow_register_mmio_get_state() {
+        let mut reg = create_mock_shadow_register();
+
+        unsafe {
+            // Set state bits [7:3] = 0b00010 = RegisterState::Loaded (1)
+            reg.status = 0b00001000; // bit 3 = 1
+            let state = reg.get_state();
+            assert_eq!(state, RegisterState::Loaded);
+
+            // Set state to Modified (2)
+            reg.status = 0b00010000; // bit 4 = 1
+            let state = reg.get_state();
+            assert_eq!(state, RegisterState::Modified);
+
+            // Set state to Committed (3)
+            reg.status = 0b00011000; // bits [4:3] = 11
+            let state = reg.get_state();
+            assert_eq!(state, RegisterState::Committed);
+        }
+    }
+
+    #[test]
+    fn test_shadow_register_mmio_get_version() {
+        let mut reg = create_mock_shadow_register();
+
+        unsafe {
+            // Set version bits [15:8] = 42
+            reg.status = 42 << 8;
+            let version = reg.get_version();
+            assert_eq!(version, 42);
+
+            // Set version to 255
+            reg.status = 255 << 8;
+            let version = reg.get_version();
+            assert_eq!(version, 255);
+        }
+    }
+
+    #[test]
+    fn test_mmio_command_enum_values() {
+        assert_eq!(MMIOCommand::Nop as u8, 0x00);
+        assert_eq!(MMIOCommand::Read as u8, 0x01);
+        assert_eq!(MMIOCommand::Write as u8, 0x02);
+        assert_eq!(MMIOCommand::Commit as u8, 0x03);
+        assert_eq!(MMIOCommand::Rollback as u8, 0x04);
+        assert_eq!(MMIOCommand::Lock as u8, 0x05);
+        assert_eq!(MMIOCommand::Unlock as u8, 0x06);
+        assert_eq!(MMIOCommand::Verify as u8, 0x07);
+        assert_eq!(MMIOCommand::LoadFuse as u8, 0x08);
+        assert_eq!(MMIOCommand::CommitFuse as u8, 0x09);
+        assert_eq!(MMIOCommand::Sync as u8, 0x0A);
+    }
+
+    #[test]
+    fn test_shadow_register_mmio_execute_command_success() {
+        let mut reg = create_mock_shadow_register();
+
+        unsafe {
+            // Status is not busy, no error
+            reg.status = 0;
+
+            let result = reg.execute_command(MMIOCommand::Read, 5);
+            assert!(result.is_ok());
+
+            // Check control register format: [7:0] = command, [15:8] = register_id
+            let ctrl = reg.read_control();
+            let cmd = (ctrl & 0xFF) as u8;
+            let reg_id = ((ctrl >> 8) & 0xFF) as u8;
+
+            assert_eq!(cmd, MMIOCommand::Read as u8);
+            assert_eq!(reg_id, 5);
+        }
+    }
+
+    #[test]
+    fn test_shadow_register_mmio_execute_command_error() {
+        let mut reg = create_mock_shadow_register();
+
+        unsafe {
+            // Set error bit (bit 1)
+            reg.status = 0x2;
+
+            let result = reg.execute_command(MMIOCommand::Write, 10);
+            assert!(result.is_err());
+            assert_eq!(result.unwrap_err(), "MMIO command failed");
+        }
+    }
+
+    #[test]
+    fn test_shadow_register_mmio_control_format() {
+        // Test control register packing
+        let command = MMIOCommand::Commit as u32;
+        let register_id = 42u32;
+
+        let ctrl = command | (register_id << 8);
+
+        // Extract command (bits [7:0])
+        let extracted_cmd = (ctrl & 0xFF) as u8;
+        assert_eq!(extracted_cmd, MMIOCommand::Commit as u8);
+
+        // Extract register_id (bits [15:8])
+        let extracted_id = ((ctrl >> 8) & 0xFF) as u8;
+        assert_eq!(extracted_id, 42);
+    }
+
+    #[test]
+    fn test_shadow_register_mmio_status_layout() {
+        let mut reg = create_mock_shadow_register();
+
+        unsafe {
+            // Complex status:
+            // bit 0 = busy (1)
+            // bit 1 = error (0)
+            // bit 2 = locked (1)
+            // bits [7:3] = state (0b00011 = Committed)
+            // bits [15:8] = version (5)
+            // bits [31:16] = checksum (0xABCD)
+
+            let status: u32 =
+                1 |                        // busy
+                (1 << 2) |                 // locked
+                (3 << 3) |                 // state = Committed
+                (5 << 8) |                 // version
+                (0xABCD << 16);            // checksum
+
+            reg.status = status;
+
+            assert!(reg.is_busy());
+            assert!(!reg.has_error());
+            assert_eq!(reg.get_state(), RegisterState::Committed);
+            assert_eq!(reg.get_version(), 5);
+        }
+    }
+
+    #[test]
+    fn test_shadow_mmio_controller_initialization() {
+        use crate::shadow_register::ShadowRegisterBank;
+        use crate::fuse_manager::FuseManager;
+
+        let shadow_bank = Box::new(ShadowRegisterBank::new());
+        let fuse_manager = Box::new(FuseManager::new());
+
+        let shadow_ptr = Box::into_raw(shadow_bank);
+        let fuse_ptr = Box::into_raw(fuse_manager);
+
+        unsafe {
+            let controller = ShadowMMIOController::new(shadow_ptr, fuse_ptr);
+
+            assert_eq!(controller.mmio as usize, SHADOW_REG_BASE);
+            assert_eq!(controller.shadow_bank, shadow_ptr);
+            assert_eq!(controller.fuse_manager, fuse_ptr);
+
+            // Cleanup
+            let _ = Box::from_raw(shadow_ptr);
+            let _ = Box::from_raw(fuse_ptr);
+        }
+    }
+
+    #[test]
+    fn test_mmio_command_all_values() {
+        // Ensure all 11 commands have unique values
+        let commands = [
+            MMIOCommand::Nop as u8,
+            MMIOCommand::Read as u8,
+            MMIOCommand::Write as u8,
+            MMIOCommand::Commit as u8,
+            MMIOCommand::Rollback as u8,
+            MMIOCommand::Lock as u8,
+            MMIOCommand::Unlock as u8,
+            MMIOCommand::Verify as u8,
+            MMIOCommand::LoadFuse as u8,
+            MMIOCommand::CommitFuse as u8,
+            MMIOCommand::Sync as u8,
+        ];
+
+        // Check all are sequential from 0x00 to 0x0A
+        for (i, &cmd) in commands.iter().enumerate() {
+            assert_eq!(cmd, i as u8);
+        }
+    }
+
+    #[test]
+    fn test_shadow_register_mmio_volatile_semantics() {
+        let mut reg = create_mock_shadow_register();
+
+        unsafe {
+            // Multiple writes to data register
+            reg.write_data(0x1111);
+            reg.write_data(0x2222);
+            reg.write_data(0x3333);
+
+            // Last write should be visible
+            assert_eq!(reg.read_data(), 0x3333);
+
+            // Multiple writes to control register
+            reg.write_control(0xAAAA);
+            reg.write_control(0xBBBB);
+
+            assert_eq!(reg.read_control(), 0xBBBB);
+        }
+    }
+
+    #[test]
+    fn test_shadow_register_mmio_state_extraction() {
+        let mut reg = create_mock_shadow_register();
+
+        unsafe {
+            // Test all RegisterState values
+            let states = [
+                (RegisterState::Uninitialized, 0),
+                (RegisterState::Loaded, 1),
+                (RegisterState::Modified, 2),
+                (RegisterState::Committed, 3),
+                (RegisterState::Locked, 4),
+            ];
+
+            for (expected_state, state_val) in states {
+                // Set state bits [7:3]
+                reg.status = state_val << 3;
+                let actual_state = reg.get_state();
+                assert_eq!(actual_state, expected_state);
+            }
+        }
+    }
+
+    #[test]
+    fn test_shadow_register_mmio_version_range() {
+        let mut reg = create_mock_shadow_register();
+
+        unsafe {
+            // Test version boundaries
+            for version in [0, 1, 42, 127, 255] {
+                reg.status = (version as u32) << 8;
+                let read_version = reg.get_version();
+                assert_eq!(read_version, version);
+            }
+        }
+    }
+}
