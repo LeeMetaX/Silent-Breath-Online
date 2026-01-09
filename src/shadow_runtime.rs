@@ -380,3 +380,517 @@ pub unsafe extern "C" fn shadow_runtime_verify_all(runtime: *mut ShadowRegisterR
 
 extern crate alloc;
 use alloc::boxed::Box;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::boxed::Box;
+
+    /// Test: ShadowRegisterRuntime initialization
+    #[test]
+    fn test_shadow_register_runtime_new() {
+        let runtime = ShadowRegisterRuntime::new();
+
+        // Verify empty bank has no registers
+        assert!(runtime.shadow_bank.get_register(0).is_none());
+        assert!(runtime.mmio_controller.is_none());
+        assert!(runtime.verify_all());
+    }
+
+    /// Test: ShadowRegisterRuntime init with MMIO
+    #[test]
+    fn test_shadow_register_runtime_init() {
+        let mut runtime = ShadowRegisterRuntime::new();
+
+        unsafe {
+            runtime.init();
+        }
+
+        assert!(runtime.mmio_controller.is_some());
+    }
+
+    /// Test: Register a fuse successfully
+    #[test]
+    fn test_shadow_register_runtime_register_fuse_success() {
+        let mut runtime = ShadowRegisterRuntime::new();
+
+        let result = runtime.register_fuse(1, 0x1000, FuseMode::OTP);
+        assert!(result.is_ok());
+
+        // Verify the register was added
+        assert!(runtime.shadow_bank.get_register(1).is_some());
+    }
+
+    /// Test: Register duplicate returns error on full bank
+    #[test]
+    fn test_shadow_register_runtime_register_fuse_duplicate() {
+        let mut runtime = ShadowRegisterRuntime::new();
+
+        // Register first fuse
+        let result1 = runtime.register_fuse(1, 0x1000, FuseMode::OTP);
+        assert!(result1.is_ok());
+
+        // Registering different register_id with different fuse address should succeed
+        let result2 = runtime.register_fuse(2, 0x2000, FuseMode::MTP);
+        assert!(result2.is_ok());
+
+        // Verify both registers exist
+        assert!(runtime.shadow_bank.get_register(1).is_some());
+        assert!(runtime.shadow_bank.get_register(2).is_some());
+    }
+
+    /// Test: Read from existing register
+    #[test]
+    fn test_shadow_register_runtime_read_success() {
+        let mut runtime = ShadowRegisterRuntime::new();
+
+        // Register, write, and commit
+        runtime.register_fuse(1, 0x1000, FuseMode::OTP).unwrap();
+        runtime.write(1, 0x12345678).unwrap();
+        runtime.commit(1).unwrap();
+
+        // Read back
+        let result = runtime.read(1);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 0x12345678);
+    }
+
+    /// Test: Read from non-existent register
+    #[test]
+    fn test_shadow_register_runtime_read_not_found() {
+        let runtime = ShadowRegisterRuntime::new();
+
+        let result = runtime.read(999);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "Register not found");
+    }
+
+    /// Test: Write to existing register
+    #[test]
+    fn test_shadow_register_runtime_write_success() {
+        let mut runtime = ShadowRegisterRuntime::new();
+
+        runtime.register_fuse(1, 0x1000, FuseMode::OTP).unwrap();
+
+        let result = runtime.write(1, 0xDEADBEEF);
+        assert!(result.is_ok());
+
+        // Commit to update checksum
+        runtime.commit(1).unwrap();
+
+        // Verify the write
+        let read_result = runtime.read(1);
+        assert_eq!(read_result.unwrap(), 0xDEADBEEF);
+    }
+
+    /// Test: Write to non-existent register
+    #[test]
+    fn test_shadow_register_runtime_write_not_found() {
+        let mut runtime = ShadowRegisterRuntime::new();
+
+        let result = runtime.write(999, 0x12345678);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "Register not found");
+    }
+
+    /// Test: Commit existing register
+    #[test]
+    fn test_shadow_register_runtime_commit_success() {
+        let mut runtime = ShadowRegisterRuntime::new();
+
+        runtime.register_fuse(1, 0x1000, FuseMode::OTP).unwrap();
+        runtime.write(1, 0x12345678).unwrap();
+
+        let result = runtime.commit(1);
+        assert!(result.is_ok());
+    }
+
+    /// Test: Commit non-existent register
+    #[test]
+    fn test_shadow_register_runtime_commit_not_found() {
+        let mut runtime = ShadowRegisterRuntime::new();
+
+        let result = runtime.commit(999);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "Register not found");
+    }
+
+    /// Test: Verify all registers
+    #[test]
+    fn test_shadow_register_runtime_verify_all() {
+        let mut runtime = ShadowRegisterRuntime::new();
+
+        // Empty runtime should verify successfully
+        assert!(runtime.verify_all());
+
+        // Add, write, commit and verify with registers
+        runtime.register_fuse(1, 0x1000, FuseMode::OTP).unwrap();
+        runtime.write(1, 0x12345678).unwrap();
+        runtime.commit(1).unwrap();
+
+        assert!(runtime.verify_all());
+    }
+
+    /// Test: Get ECC stats
+    #[test]
+    fn test_shadow_register_runtime_get_ecc_stats() {
+        let runtime = ShadowRegisterRuntime::new();
+
+        let (single_bit, multi_bit) = runtime.get_ecc_stats();
+
+        // Initially should be zero
+        assert_eq!(single_bit, 0);
+        assert_eq!(multi_bit, 0);
+    }
+
+    /// Test: VersionedShadowRuntime initialization
+    #[test]
+    fn test_versioned_shadow_runtime_new() {
+        let runtime = VersionedShadowRuntime::new();
+
+        assert_eq!(runtime.count, 0);
+
+        // Try to get register from empty runtime
+        assert!(runtime.get_register(0).is_none());
+    }
+
+    /// Test: Add register to VersionedShadowRuntime
+    #[test]
+    fn test_versioned_shadow_runtime_add_register() {
+        let mut runtime = VersionedShadowRuntime::new();
+
+        let result = runtime.add_register(1, 0x1000);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 0);
+        assert_eq!(runtime.count, 1);
+
+        // Verify we can get the register
+        assert!(runtime.get_register(0).is_some());
+    }
+
+    /// Test: VersionedShadowRuntime full capacity
+    #[test]
+    fn test_versioned_shadow_runtime_full() {
+        let mut runtime = VersionedShadowRuntime::new();
+
+        // Fill to capacity (64 registers)
+        for i in 0..64 {
+            let result = runtime.add_register(i, 0x1000 + (i as u64 * 0x100));
+            assert!(result.is_ok());
+        }
+
+        // Try to add one more - should fail
+        let result = runtime.add_register(64, 0x10000);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "Runtime is full");
+    }
+
+    /// Test: Write versioned
+    #[test]
+    fn test_versioned_shadow_runtime_write_versioned() {
+        let mut runtime = VersionedShadowRuntime::new();
+
+        runtime.add_register(1, 0x1000).unwrap();
+
+        let result = runtime.write_versioned(0, 0x12345678);
+        assert!(result.is_ok());
+
+        // Version should be returned (starts at 0, gets incremented)
+        let version = result.unwrap();
+        assert_eq!(version, 0);
+    }
+
+    /// Test: Write versioned with invalid index
+    #[test]
+    fn test_versioned_shadow_runtime_write_versioned_invalid() {
+        let mut runtime = VersionedShadowRuntime::new();
+
+        let result = runtime.write_versioned(999, 0x12345678);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "Invalid register index");
+    }
+
+    /// Test: Rollback to version
+    #[test]
+    fn test_versioned_shadow_runtime_rollback_to_version() {
+        let mut runtime = VersionedShadowRuntime::new();
+
+        runtime.add_register(1, 0x1000).unwrap();
+
+        // Write multiple versions
+        let v1 = runtime.write_versioned(0, 0x1111).unwrap();
+        runtime.write_versioned(0, 0x2222).unwrap();
+        runtime.write_versioned(0, 0x3333).unwrap();
+
+        // Rollback to first version
+        let result = runtime.rollback_to_version(0, v1);
+        assert!(result.is_ok());
+    }
+
+    /// Test: Rollback by offset
+    #[test]
+    fn test_versioned_shadow_runtime_rollback_by_offset() {
+        let mut runtime = VersionedShadowRuntime::new();
+
+        runtime.add_register(1, 0x1000).unwrap();
+
+        // Write multiple versions
+        runtime.write_versioned(0, 0x1111).unwrap();
+        runtime.write_versioned(0, 0x2222).unwrap();
+        runtime.write_versioned(0, 0x3333).unwrap();
+
+        // Rollback by 1 offset
+        let result = runtime.rollback_by_offset(0, 1);
+        assert!(result.is_ok());
+    }
+
+    /// Test: FFI shadow_runtime_init returns valid pointer
+    #[test]
+    fn test_ffi_shadow_runtime_init() {
+        unsafe {
+            let ptr = shadow_runtime_init();
+
+            assert!(!ptr.is_null());
+
+            // Verify the runtime was initialized
+            assert!((*ptr).mmio_controller.is_some());
+
+            // Cleanup: Convert back to Box and drop
+            let _ = Box::from_raw(ptr);
+        }
+    }
+
+    /// Test: FFI shadow_runtime_register_fuse with null pointer
+    #[test]
+    fn test_ffi_shadow_runtime_register_fuse_null() {
+        unsafe {
+            let result = shadow_runtime_register_fuse(
+                core::ptr::null_mut(),
+                1,
+                0x1000,
+                0
+            );
+
+            assert_eq!(result, -1);
+        }
+    }
+
+    /// Test: FFI shadow_runtime_register_fuse success
+    #[test]
+    fn test_ffi_shadow_runtime_register_fuse_success() {
+        unsafe {
+            let ptr = shadow_runtime_init();
+
+            // Register with OTP mode (0)
+            let result = shadow_runtime_register_fuse(ptr, 1, 0x1000, 0);
+            assert_eq!(result, 0);
+
+            // Register with MTP mode (1)
+            let result = shadow_runtime_register_fuse(ptr, 2, 0x2000, 1);
+            assert_eq!(result, 0);
+
+            // Register with EEPROM mode (2)
+            let result = shadow_runtime_register_fuse(ptr, 3, 0x3000, 2);
+            assert_eq!(result, 0);
+
+            // Cleanup
+            let _ = Box::from_raw(ptr);
+        }
+    }
+
+    /// Test: FFI shadow_runtime_register_fuse invalid mode
+    #[test]
+    fn test_ffi_shadow_runtime_register_fuse_invalid_mode() {
+        unsafe {
+            let ptr = shadow_runtime_init();
+
+            // Invalid mode (3)
+            let result = shadow_runtime_register_fuse(ptr, 1, 0x1000, 3);
+            assert_eq!(result, -1);
+
+            // Cleanup
+            let _ = Box::from_raw(ptr);
+        }
+    }
+
+    /// Test: FFI shadow_runtime_read with null pointers
+    #[test]
+    fn test_ffi_shadow_runtime_read_null() {
+        unsafe {
+            let mut out_value: u64 = 0;
+
+            // Null runtime pointer
+            let result = shadow_runtime_read(core::ptr::null_mut(), 1, &mut out_value);
+            assert_eq!(result, -1);
+
+            // Null output pointer
+            let ptr = shadow_runtime_init();
+            let result = shadow_runtime_read(ptr, 1, core::ptr::null_mut());
+            assert_eq!(result, -1);
+
+            // Cleanup
+            let _ = Box::from_raw(ptr);
+        }
+    }
+
+    /// Test: FFI shadow_runtime_read success
+    #[test]
+    fn test_ffi_shadow_runtime_read_success() {
+        unsafe {
+            let ptr = shadow_runtime_init();
+
+            // Register, write, and commit
+            shadow_runtime_register_fuse(ptr, 1, 0x1000, 0);
+            shadow_runtime_write(ptr, 1, 0xDEADBEEF);
+            shadow_runtime_commit(ptr, 1);
+
+            // Read back
+            let mut out_value: u64 = 0;
+            let result = shadow_runtime_read(ptr, 1, &mut out_value);
+
+            assert_eq!(result, 0);
+            assert_eq!(out_value, 0xDEADBEEF);
+
+            // Cleanup
+            let _ = Box::from_raw(ptr);
+        }
+    }
+
+    /// Test: FFI shadow_runtime_write with null pointer
+    #[test]
+    fn test_ffi_shadow_runtime_write_null() {
+        unsafe {
+            let result = shadow_runtime_write(core::ptr::null_mut(), 1, 0x12345678);
+            assert_eq!(result, -1);
+        }
+    }
+
+    /// Test: FFI shadow_runtime_write success
+    #[test]
+    fn test_ffi_shadow_runtime_write_success() {
+        unsafe {
+            let ptr = shadow_runtime_init();
+
+            shadow_runtime_register_fuse(ptr, 1, 0x1000, 0);
+
+            let result = shadow_runtime_write(ptr, 1, 0xCAFEBABE);
+            assert_eq!(result, 0);
+
+            // Cleanup
+            let _ = Box::from_raw(ptr);
+        }
+    }
+
+    /// Test: FFI shadow_runtime_commit with null pointer
+    #[test]
+    fn test_ffi_shadow_runtime_commit_null() {
+        unsafe {
+            let result = shadow_runtime_commit(core::ptr::null_mut(), 1);
+            assert_eq!(result, -1);
+        }
+    }
+
+    /// Test: FFI shadow_runtime_commit success
+    #[test]
+    fn test_ffi_shadow_runtime_commit_success() {
+        unsafe {
+            let ptr = shadow_runtime_init();
+
+            shadow_runtime_register_fuse(ptr, 1, 0x1000, 0);
+            shadow_runtime_write(ptr, 1, 0x12345678);
+
+            let result = shadow_runtime_commit(ptr, 1);
+            assert_eq!(result, 0);
+
+            // Cleanup
+            let _ = Box::from_raw(ptr);
+        }
+    }
+
+    /// Test: FFI shadow_runtime_load_from_fuses with null pointer
+    #[test]
+    fn test_ffi_shadow_runtime_load_from_fuses_null() {
+        unsafe {
+            let result = shadow_runtime_load_from_fuses(core::ptr::null_mut());
+            assert_eq!(result, -1);
+        }
+    }
+
+    /// Test: FFI shadow_runtime_commit_to_fuses with null pointer
+    #[test]
+    fn test_ffi_shadow_runtime_commit_to_fuses_null() {
+        unsafe {
+            let result = shadow_runtime_commit_to_fuses(core::ptr::null_mut());
+            assert_eq!(result, -1);
+        }
+    }
+
+    /// Test: FFI shadow_runtime_verify_all with null pointer
+    #[test]
+    fn test_ffi_shadow_runtime_verify_all_null() {
+        unsafe {
+            let result = shadow_runtime_verify_all(core::ptr::null_mut());
+            assert_eq!(result, -1);
+        }
+    }
+
+    /// Test: FFI shadow_runtime_verify_all success
+    #[test]
+    fn test_ffi_shadow_runtime_verify_all_success() {
+        unsafe {
+            let ptr = shadow_runtime_init();
+
+            shadow_runtime_register_fuse(ptr, 1, 0x1000, 0);
+            shadow_runtime_write(ptr, 1, 0x12345678);
+            shadow_runtime_commit(ptr, 1);
+
+            let result = shadow_runtime_verify_all(ptr);
+            assert_eq!(result, 0);
+
+            // Cleanup
+            let _ = Box::from_raw(ptr);
+        }
+    }
+
+    /// Test: FFI integration - complete workflow
+    #[test]
+    fn test_ffi_complete_workflow() {
+        unsafe {
+            // Initialize runtime
+            let ptr = shadow_runtime_init();
+            assert!(!ptr.is_null());
+
+            // Register multiple fuses
+            assert_eq!(shadow_runtime_register_fuse(ptr, 1, 0x1000, 0), 0);
+            assert_eq!(shadow_runtime_register_fuse(ptr, 2, 0x2000, 1), 0);
+            assert_eq!(shadow_runtime_register_fuse(ptr, 3, 0x3000, 2), 0);
+
+            // Write to registers
+            assert_eq!(shadow_runtime_write(ptr, 1, 0x1111), 0);
+            assert_eq!(shadow_runtime_write(ptr, 2, 0x2222), 0);
+            assert_eq!(shadow_runtime_write(ptr, 3, 0x3333), 0);
+
+            // Commit registers
+            assert_eq!(shadow_runtime_commit(ptr, 1), 0);
+            assert_eq!(shadow_runtime_commit(ptr, 2), 0);
+            assert_eq!(shadow_runtime_commit(ptr, 3), 0);
+
+            // Read back and verify
+            let mut value: u64 = 0;
+            assert_eq!(shadow_runtime_read(ptr, 1, &mut value), 0);
+            assert_eq!(value, 0x1111);
+
+            assert_eq!(shadow_runtime_read(ptr, 2, &mut value), 0);
+            assert_eq!(value, 0x2222);
+
+            assert_eq!(shadow_runtime_read(ptr, 3, &mut value), 0);
+            assert_eq!(value, 0x3333);
+
+            // Verify all
+            assert_eq!(shadow_runtime_verify_all(ptr), 0);
+
+            // Cleanup
+            let _ = Box::from_raw(ptr);
+        }
+    }
+}

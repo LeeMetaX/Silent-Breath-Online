@@ -336,3 +336,336 @@ pub fn get_timestamp() -> u64 {
 // Vec implementation for no_std
 extern crate alloc;
 use alloc::vec::Vec;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::vec;
+
+    #[test]
+    fn test_version_entry_initialization() {
+        let entry = VersionEntry::new();
+        assert_eq!(entry.version, 0);
+        assert_eq!(entry.value, 0);
+        assert_eq!(entry.timestamp, 0);
+        assert_eq!(entry.checksum, 0);
+        assert!(!entry.is_valid());
+    }
+
+    #[test]
+    fn test_version_entry_from_state() {
+        let version = 1;
+        let value = 0xABCDEF01;
+        let timestamp = 1000;
+
+        let entry = VersionEntry::from_state(version, value, timestamp);
+
+        assert_eq!(entry.get_version(), version);
+        assert_eq!(entry.get_value(), value);
+        assert_eq!(entry.get_timestamp(), timestamp);
+        assert!(entry.is_valid());
+        assert!(entry.verify());
+    }
+
+    #[test]
+    fn test_version_entry_checksum_validation() {
+        let entry = VersionEntry::from_state(1, 0x12345678, 2000);
+
+        // Valid entry should verify
+        assert!(entry.verify());
+
+        // Create invalid entry manually
+        let mut invalid_entry = entry;
+        invalid_entry.checksum = 0xFFFFFFFF;
+
+        // Should fail verification
+        assert!(!invalid_entry.verify());
+    }
+
+    #[test]
+    fn test_version_history_initialization() {
+        let history = VersionHistory::new();
+        assert_eq!(history.count(), 0);
+        assert_eq!(history.current_version(), 0);
+        assert!(history.get_latest().is_none());
+    }
+
+    #[test]
+    fn test_version_history_push_and_get() {
+        let mut history = VersionHistory::new();
+
+        // Push first version
+        let v1 = history.push(0x1111, 100);
+        assert_eq!(v1, 0);
+        assert_eq!(history.count(), 1);
+
+        // Push second version
+        let v2 = history.push(0x2222, 200);
+        assert_eq!(v2, 1);
+        assert_eq!(history.count(), 2);
+
+        // Retrieve versions
+        let entry1 = history.get(0).unwrap();
+        assert_eq!(entry1.get_value(), 0x1111);
+        assert_eq!(entry1.get_timestamp(), 100);
+
+        let entry2 = history.get(1).unwrap();
+        assert_eq!(entry2.get_value(), 0x2222);
+        assert_eq!(entry2.get_timestamp(), 200);
+    }
+
+    #[test]
+    fn test_version_history_circular_buffer_wraparound() {
+        let mut history = VersionHistory::new();
+
+        // Fill buffer with 16 versions
+        for i in 0..16 {
+            let version = history.push(0x1000 + i as u64, i as u64 * 100);
+            assert_eq!(version, i);
+        }
+
+        assert_eq!(history.count(), 16);
+
+        // Add 17th version - should wrap around
+        let v17 = history.push(0x2000, 1700);
+        assert_eq!(v17, 16);
+        assert_eq!(history.count(), 16); // Still 16 (saturated)
+
+        // First version (0) should be overwritten
+        assert!(history.get(0).is_none());
+
+        // Version 16 should be accessible
+        assert!(history.get(16).is_some());
+        assert_eq!(history.get(16).unwrap().get_value(), 0x2000);
+    }
+
+    #[test]
+    fn test_version_history_get_latest() {
+        let mut history = VersionHistory::new();
+
+        // No versions yet
+        assert!(history.get_latest().is_none());
+
+        // Add versions
+        history.push(0xAAAA, 100);
+        history.push(0xBBBB, 200);
+        history.push(0xCCCC, 300);
+
+        // Latest should be the last one added
+        let latest = history.get_latest().unwrap();
+        assert_eq!(latest.get_value(), 0xCCCC);
+        assert_eq!(latest.get_timestamp(), 300);
+        assert_eq!(latest.get_version(), 2);
+    }
+
+    #[test]
+    fn test_version_history_get_by_offset() {
+        let mut history = VersionHistory::new();
+
+        // Add 5 versions
+        for i in 0..5 {
+            history.push(0x1000 + i as u64, i as u64 * 100);
+        }
+
+        // Offset 0 = latest (version 4)
+        let entry0 = history.get_by_offset(0).unwrap();
+        assert_eq!(entry0.get_version(), 4);
+        assert_eq!(entry0.get_value(), 0x1004);
+
+        // Offset 1 = previous (version 3)
+        let entry1 = history.get_by_offset(1).unwrap();
+        assert_eq!(entry1.get_version(), 3);
+        assert_eq!(entry1.get_value(), 0x1003);
+
+        // Offset 4 = oldest (version 0)
+        let entry4 = history.get_by_offset(4).unwrap();
+        assert_eq!(entry4.get_version(), 0);
+        assert_eq!(entry4.get_value(), 0x1000);
+
+        // Offset 5 = out of range
+        assert!(history.get_by_offset(5).is_none());
+    }
+
+    #[test]
+    fn test_versioned_shadow_register_write_and_rollback() {
+        let mut vreg = VersionedShadowRegister::new(1, 0x1000);
+
+        // Write first version
+        let v1 = vreg.write_versioned(0xAAAA, 100).unwrap();
+        assert_eq!(v1, 0);
+        vreg.get_register_mut().commit().unwrap();
+
+        // Write second version
+        let v2 = vreg.write_versioned(0xBBBB, 200).unwrap();
+        assert_eq!(v2, 1);
+        vreg.get_register_mut().commit().unwrap();
+
+        // Write third version
+        let v3 = vreg.write_versioned(0xCCCC, 300).unwrap();
+        assert_eq!(v3, 2);
+        vreg.get_register_mut().commit().unwrap();
+
+        // Current value should be 0xCCCC
+        assert_eq!(vreg.get_register().read(), 0xCCCC);
+
+        // Rollback to version 1
+        assert!(vreg.rollback_to_version(1).is_ok());
+        assert_eq!(vreg.get_register().read(), 0xBBBB);
+
+        // Rollback to version 0
+        assert!(vreg.rollback_to_version(0).is_ok());
+        assert_eq!(vreg.get_register().read(), 0xAAAA);
+    }
+
+    #[test]
+    fn test_versioned_shadow_register_rollback_by_offset() {
+        let mut vreg = VersionedShadowRegister::new(2, 0x2000);
+
+        // Write multiple versions
+        vreg.write_versioned(0x1111, 100).unwrap();
+        vreg.get_register_mut().commit().unwrap();
+        vreg.write_versioned(0x2222, 200).unwrap();
+        vreg.get_register_mut().commit().unwrap();
+        vreg.write_versioned(0x3333, 300).unwrap();
+        vreg.get_register_mut().commit().unwrap();
+        vreg.write_versioned(0x4444, 400).unwrap();
+        vreg.get_register_mut().commit().unwrap();
+
+        // Current value is 0x4444 (offset 0)
+        assert_eq!(vreg.get_register().read(), 0x4444);
+
+        // Rollback by offset 1 (to 0x3333)
+        assert!(vreg.rollback_by_offset(1).is_ok());
+        assert_eq!(vreg.get_register().read(), 0x3333);
+
+        // Rollback by offset 2 (to 0x2222) from latest
+        // Note: We need to consider latest is still version 3 in history
+        vreg.write_versioned(0x5555, 500).unwrap(); // Write new version
+        vreg.get_register_mut().commit().unwrap();
+        assert!(vreg.rollback_by_offset(2).is_ok());
+        assert_eq!(vreg.get_register().read(), 0x3333);
+    }
+
+    #[test]
+    fn test_versioned_shadow_register_rollback_errors() {
+        let mut vreg = VersionedShadowRegister::new(3, 0x3000);
+
+        // Rollback to non-existent version
+        assert!(vreg.rollback_to_version(999).is_err());
+
+        // Rollback by invalid offset
+        assert!(vreg.rollback_by_offset(100).is_err());
+    }
+
+    #[test]
+    fn test_version_overflow_after_16_versions() {
+        let mut vreg = VersionedShadowRegister::new(4, 0x4000);
+
+        // Add 20 versions to test overflow behavior
+        for i in 0..20 {
+            vreg.write_versioned(0x1000 + i as u64, i as u64 * 100)
+                .unwrap();
+        }
+
+        let history = vreg.get_history();
+
+        // Should have exactly 16 versions (buffer size)
+        assert_eq!(history.count(), 16);
+
+        // Latest version should be version 19
+        let latest = history.get_latest().unwrap();
+        assert_eq!(latest.get_version(), 19);
+
+        // First 4 versions (0-3) should be gone (overwritten)
+        assert!(history.get(0).is_none());
+        assert!(history.get(1).is_none());
+        assert!(history.get(2).is_none());
+        assert!(history.get(3).is_none());
+
+        // Versions 4-19 should still exist
+        assert!(history.get(4).is_some());
+        assert!(history.get(19).is_some());
+    }
+
+    #[test]
+    fn test_version_history_verify_all() {
+        let mut history = VersionHistory::new();
+
+        // Add valid versions
+        history.push(0xAAAA, 100);
+        history.push(0xBBBB, 200);
+        history.push(0xCCCC, 300);
+
+        // All versions should verify
+        assert!(history.verify_all());
+    }
+
+    #[test]
+    fn test_versioned_shadow_register_diff_versions() {
+        let mut vreg = VersionedShadowRegister::new(5, 0x5000);
+
+        // Write versions
+        vreg.write_versioned(0xAAAA, 100).unwrap();
+        vreg.write_versioned(0xBBBB, 200).unwrap();
+        vreg.write_versioned(0xCCCC, 300).unwrap();
+
+        // Compare versions 0 and 2
+        let diff = vreg.diff_versions(0, 2);
+        assert!(diff.is_some());
+        let (val1, val2) = diff.unwrap();
+        assert_eq!(val1, 0xAAAA);
+        assert_eq!(val2, 0xCCCC);
+
+        // Compare with non-existent version
+        assert!(vreg.diff_versions(0, 999).is_none());
+    }
+
+    #[test]
+    fn test_versioned_shadow_register_get_all_versions() {
+        let mut vreg = VersionedShadowRegister::new(6, 0x6000);
+
+        // Write 5 versions
+        for i in 0..5 {
+            vreg.write_versioned(0x1000 + i as u64, i as u64 * 100)
+                .unwrap();
+        }
+
+        // Get all version numbers
+        let versions = vreg.get_all_versions();
+        assert_eq!(versions.len(), 5);
+        assert_eq!(versions, vec![4, 3, 2, 1, 0]); // Latest to oldest
+    }
+
+    #[test]
+    fn test_version_history_clear() {
+        let mut history = VersionHistory::new();
+
+        // Add versions
+        history.push(0xAAAA, 100);
+        history.push(0xBBBB, 200);
+        assert_eq!(history.count(), 2);
+
+        // Clear history
+        history.clear();
+        assert_eq!(history.count(), 0);
+        assert!(history.get_latest().is_none());
+
+        // Version counter should NOT reset
+        assert_eq!(history.current_version(), 2);
+
+        // Add new version - should continue from version 2
+        let next_version = history.push(0xCCCC, 300);
+        assert_eq!(next_version, 2);
+    }
+
+    #[test]
+    fn test_global_timestamp() {
+        let ts1 = get_timestamp();
+        let ts2 = get_timestamp();
+        let ts3 = get_timestamp();
+
+        // Timestamps should increment
+        assert!(ts2 > ts1);
+        assert!(ts3 > ts2);
+    }
+}
