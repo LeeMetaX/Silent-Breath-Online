@@ -1,2 +1,2 @@
-# Silent-Breath-Online
-MMO 2D Top Down Space Shooter with 5 AI Learning Pilots. The more you fight them, the faster they learn.
+## Silent-Breath-Online A Breathing POSIX Sidecar NLP ##
+||::[`12D MMIO`]<-[{{Memory:Map}}::[Input(.)]|->[:(.):]|->[Output(.)]::.. .'
