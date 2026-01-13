@@ -1,0 +1,23 @@
+[package]
+name = "i9-12900k-baremetal-abi"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Use the existing Silent-Breath-Online cache coherency system
+silent-breath-mmio = { path = ".." }
+
+# Bare-metal x86-64 support
+x86_64 = { version = "0.15", default-features = false, features = ["instructions", "abi_x86_interrupt"] }
+
+# Bootloader API
+bootloader_api = { version = "0.11", features = ["uefi"] }
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+opt-level = 3
+lto = true
+codegen-units = 1
