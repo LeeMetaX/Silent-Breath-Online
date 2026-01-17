@@ -80,13 +80,16 @@ pub fn cpuid(leaf: u32, subleaf: u32) -> CpuidResult {
     let mut edx: u32;
 
     unsafe {
+        // LLVM reserves ebx in PIC mode, so we need to save/restore it manually
         asm!(
+            "mov {tmp:r}, rbx",
             "cpuid",
+            "xchg {tmp:r}, rbx",
+            tmp = out(reg) ebx,
             inout("eax") leaf => eax,
-            inout("ebx") 0u32 => ebx,
             inout("ecx") subleaf => ecx,
-            inout("edx") 0u32 => edx,
-            options(nomem, nostack)
+            out("edx") edx,
+            options(nomem, nostack, preserves_flags)
         );
     }
 

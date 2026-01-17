@@ -11,7 +11,7 @@ silent-breath-mmio = { path = ".." }
 x86_64 = { version = "0.15", default-features = false, features = ["instructions", "abi_x86_interrupt"] }
 
 # Bootloader API
-bootloader_api = { version = "0.11", features = ["uefi"] }
+bootloader_api = "0.11"
 
 [profile.dev]
 panic = "abort"

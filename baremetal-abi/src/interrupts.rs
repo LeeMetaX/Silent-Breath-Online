@@ -76,7 +76,7 @@ extern "x86-interrupt" fn double_fault_handler(
         error_code,
         stack_frame.instruction_pointer.as_u64(),
         stack_frame.stack_pointer.as_u64(),
-        stack_frame.code_segment,
+        stack_frame.code_segment.0,
         stack_frame.cpu_flags,
     );
 }
@@ -113,7 +113,7 @@ extern "x86-interrupt" fn general_protection_fault_handler(
         index,
         stack_frame.instruction_pointer.as_u64(),
         stack_frame.stack_pointer.as_u64(),
-        stack_frame.code_segment,
+        stack_frame.code_segment.0,
     );
 }
 
@@ -160,7 +160,7 @@ extern "x86-interrupt" fn invalid_opcode_handler(stack_frame: InterruptStackFram
          CS: {:#x}",
         stack_frame.instruction_pointer.as_u64(),
         stack_frame.stack_pointer.as_u64(),
-        stack_frame.code_segment,
+        stack_frame.code_segment.0,
     );
 }
 

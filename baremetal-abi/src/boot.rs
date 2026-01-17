@@ -150,9 +150,8 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
         ));
     }
 
-    if let Some(message) = info.message() {
-        log_fmt(format_args!("Message: {}", message));
-    }
+    let message = info.message();
+    log_fmt(format_args!("Message: {}", message));
 
     // Halt the CPU
     loop {
