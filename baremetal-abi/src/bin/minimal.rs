@@ -12,12 +12,105 @@
 
 extern crate alloc;
 
+use core::alloc::{GlobalAlloc, Layout};
 use core::fmt::Write;
 use bootloader_api::{entry_point, BootInfo};
 use i9_12900k_baremetal_abi::{
     cpu, performance, CoreType,
     coherency_runtime::CoherencyRuntime,
 };
+
+/// Dummy allocator for bare-metal (fails all allocations)
+/// This satisfies the linker requirement for a global allocator
+struct DummyAllocator;
+
+unsafe impl GlobalAlloc for DummyAllocator {
+    unsafe fn alloc(&self, _layout: Layout) -> *mut u8 {
+        core::ptr::null_mut()
+    }
+
+    unsafe fn dealloc(&self, _ptr: *mut u8, _layout: Layout) {
+        // No-op
+    }
+}
+
+#[global_allocator]
+static ALLOCATOR: DummyAllocator = DummyAllocator;
+
+/// Simple serial port driver (COM1)
+struct SerialPort;
+
+impl SerialPort {
+    const PORT: u16 = 0x3F8; // COM1
+
+    /// Initialize serial port
+    #[allow(dead_code)]
+    unsafe fn init() {
+        use core::arch::asm;
+
+        // Disable interrupts
+        asm!("out dx, al", in("dx") Self::PORT + 1, in("al") 0x00u8, options(nomem, nostack));
+
+        // Enable DLAB
+        asm!("out dx, al", in("dx") Self::PORT + 3, in("al") 0x80u8, options(nomem, nostack));
+
+        // Set divisor to 3 (38400 baud)
+        asm!("out dx, al", in("dx") Self::PORT, in("al") 0x03u8, options(nomem, nostack));
+        asm!("out dx, al", in("dx") Self::PORT + 1, in("al") 0x00u8, options(nomem, nostack));
+
+        // 8N1
+        asm!("out dx, al", in("dx") Self::PORT + 3, in("al") 0x03u8, options(nomem, nostack));
+
+        // Enable FIFO
+        asm!("out dx, al", in("dx") Self::PORT + 2, in("al") 0xC7u8, options(nomem, nostack));
+
+        // Enable IRQs, RTS/DSR
+        asm!("out dx, al", in("dx") Self::PORT + 4, in("al") 0x0Bu8, options(nomem, nostack));
+    }
+
+    /// Write a byte to serial port
+    fn write_byte(byte: u8) {
+        unsafe {
+            use core::arch::asm;
+            // Wait for transmit ready (bit 5 of line status)
+            let mut ready = 0u8;
+            while (ready & 0x20) == 0 {
+                asm!("in al, dx", out("al") ready, in("dx") Self::PORT + 5, options(nomem, nostack));
+            }
+            // Write byte
+            asm!("out dx, al", in("dx") Self::PORT, in("al") byte, options(nomem, nostack));
+        }
+    }
+}
+
+impl Write for SerialPort {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        for byte in s.bytes() {
+            Self::write_byte(byte);
+        }
+        Ok(())
+    }
+}
+
+/// Serial output macro
+macro_rules! serial_print {
+    ($($arg:tt)*) => {{
+        #[cfg(not(test))]
+        {
+            use core::fmt::Write;
+            let _ = write!(SerialPort, $($arg)*);
+        }
+    }};
+}
+
+/// Serial output with newline
+macro_rules! serial_println {
+    () => { serial_print!("\n") };
+    ($($arg:tt)*) => {{
+        serial_print!($($arg)*);
+        serial_print!("\n");
+    }};
+}
 
 entry_point!(kernel_main);
 
@@ -218,80 +311,5 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
         unsafe {
             core::arch::asm!("cli; hlt", options(nomem, nostack));
         }
-    }
-}
-
-/// Serial output macro
-macro_rules! serial_print {
-    ($($arg:tt)*) => {{
-        #[cfg(not(test))]
-        {
-            use core::fmt::Write;
-            let _ = write!(SerialPort, $($arg)*);
-        }
-    }};
-}
-
-/// Serial output with newline
-macro_rules! serial_println {
-    () => { serial_print!("\n") };
-    ($($arg:tt)*) => {{
-        serial_print!($($arg)*);
-        serial_print!("\n");
-    }};
-}
-
-/// Simple serial port driver (COM1)
-struct SerialPort;
-
-impl SerialPort {
-    const PORT: u16 = 0x3F8; // COM1
-
-    /// Initialize serial port
-    #[allow(dead_code)]
-    unsafe fn init() {
-        use core::arch::asm;
-
-        // Disable interrupts
-        asm!("out dx, al", in("dx") Self::PORT + 1, in("al") 0x00u8, options(nomem, nostack));
-
-        // Enable DLAB
-        asm!("out dx, al", in("dx") Self::PORT + 3, in("al") 0x80u8, options(nomem, nostack));
-
-        // Set divisor to 3 (38400 baud)
-        asm!("out dx, al", in("dx") Self::PORT, in("al") 0x03u8, options(nomem, nostack));
-        asm!("out dx, al", in("dx") Self::PORT + 1, in("al") 0x00u8, options(nomem, nostack));
-
-        // 8N1
-        asm!("out dx, al", in("dx") Self::PORT + 3, in("al") 0x03u8, options(nomem, nostack));
-
-        // Enable FIFO
-        asm!("out dx, al", in("dx") Self::PORT + 2, in("al") 0xC7u8, options(nomem, nostack));
-
-        // Enable IRQs, RTS/DSR
-        asm!("out dx, al", in("dx") Self::PORT + 4, in("al") 0x0Bu8, options(nomem, nostack));
-    }
-
-    /// Write a byte to serial port
-    fn write_byte(byte: u8) {
-        unsafe {
-            use core::arch::asm;
-            // Wait for transmit ready (bit 5 of line status)
-            let mut ready = 0u8;
-            while (ready & 0x20) == 0 {
-                asm!("in al, dx", out("al") ready, in("dx") Self::PORT + 5, options(nomem, nostack));
-            }
-            // Write byte
-            asm!("out dx, al", in("dx") Self::PORT, in("al") byte, options(nomem, nostack));
-        }
-    }
-}
-
-impl Write for SerialPort {
-    fn write_str(&mut self, s: &str) -> core::fmt::Result {
-        for byte in s.bytes() {
-            Self::write_byte(byte);
-        }
-        Ok(())
     }
 }

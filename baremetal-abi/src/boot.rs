@@ -5,16 +5,18 @@
 use crate::cpu;
 use bootloader_api::{entry_point, BootInfo};
 
-/// Kernel entry point
-///
-/// Called by bootloader after setting up:
-/// - Identity mapping for physical memory
-/// - Page tables
-/// - GDT
-entry_point!(kernel_main);
-
 /// Main kernel initialization function
-fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
+///
+/// This function can be used by binaries as their kernel entry point.
+/// Binaries should call `entry_point!(kernel_main)` in their own code.
+///
+/// Initializes:
+/// - CPU (SSE/AVX)
+/// - Interrupts (IDT)
+/// - Cache coherency (MESI protocol)
+/// - Memory management
+/// - Performance monitoring
+pub fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     // Initialize serial output for debugging (if available)
     #[cfg(feature = "serial")]
     serial::init();
@@ -134,31 +136,6 @@ fn log_fmt(args: core::fmt::Arguments) {
 
     #[cfg(not(feature = "serial"))]
     let _ = args;
-}
-
-/// Panic handler
-#[panic_handler]
-fn panic(info: &core::panic::PanicInfo) -> ! {
-    log("KERNEL PANIC!");
-
-    if let Some(location) = info.location() {
-        log_fmt(format_args!(
-            "Panic at {}:{}:{}",
-            location.file(),
-            location.line(),
-            location.column()
-        ));
-    }
-
-    let message = info.message();
-    log_fmt(format_args!("Message: {}", message));
-
-    // Halt the CPU
-    loop {
-        unsafe {
-            core::arch::asm!("cli; hlt", options(nomem, nostack));
-        }
-    }
 }
 
 /// Optional serial port module for debugging
