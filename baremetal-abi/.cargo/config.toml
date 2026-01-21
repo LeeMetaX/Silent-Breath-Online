@@ -1,8 +1,11 @@
 [build]
 target = "x86_64-i9-12900k.json"
 
+[target.x86_64-i9-12900k]
+rustflags = ["-C", "link-arg=-T/home/user/Silent-Breath-Online/baremetal-abi/linker.ld"]
+
 [target.'cfg(target_os = "none")']
-runner = "bootimage runner"
+runner = "qemu-system-x86_64 -serial stdio"
 
 [unstable]
 build-std = ["core", "compiler_builtins", "alloc"]

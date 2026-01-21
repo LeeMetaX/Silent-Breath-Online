@@ -6,6 +6,8 @@
 //! - Cache coherency (MESI protocol)
 //! - MSR access
 //! - Exception handling
+//!
+//! Boots via Multiboot2 protocol (QEMU/GRUB compatible)
 
 #![no_std]
 #![no_main]
@@ -19,6 +21,52 @@ use i9_12900k_baremetal_abi::{
     coherency_runtime::CoherencyRuntime,
     boot::BootInfo,
 };
+
+// ============================================================================
+// Multiboot2 Header
+// ============================================================================
+
+/// Multiboot2 header structure
+///
+/// This header allows the kernel to be loaded by Multiboot2-compliant
+/// bootloaders like QEMU (with -kernel flag) and GRUB.
+#[repr(C, align(8))]
+struct Multiboot2Header {
+    magic: u32,
+    architecture: u32,
+    header_length: u32,
+    checksum: u32,
+    // End tag
+    end_tag_type: u16,
+    end_tag_flags: u16,
+    end_tag_size: u32,
+}
+
+/// Multiboot2 magic number
+const MULTIBOOT2_MAGIC: u32 = 0xE85250D6;
+
+/// Architecture: i386 (32-bit protected mode entry)
+const MULTIBOOT2_ARCH_I386: u32 = 0;
+
+/// Multiboot2 header (placed at the beginning of the binary)
+#[used]
+#[link_section = ".multiboot2"]
+static MULTIBOOT2_HEADER: Multiboot2Header = {
+    const HEADER_LENGTH: u32 = 24;
+    Multiboot2Header {
+        magic: MULTIBOOT2_MAGIC,
+        architecture: MULTIBOOT2_ARCH_I386,
+        header_length: HEADER_LENGTH,
+        checksum: 0u32.wrapping_sub(MULTIBOOT2_MAGIC.wrapping_add(MULTIBOOT2_ARCH_I386).wrapping_add(HEADER_LENGTH)),
+        end_tag_type: 0,
+        end_tag_flags: 0,
+        end_tag_size: 8,
+    }
+};
+
+// ============================================================================
+// Memory Allocator
+// ============================================================================
 
 /// Dummy allocator for bare-metal (fails all allocations)
 /// This satisfies the linker requirement for a global allocator
@@ -114,22 +162,53 @@ macro_rules! serial_println {
 
 /// Static boot info
 ///
-/// In a full implementation, this would be populated by the bootloader.
+/// Populated by parsing Multiboot2 information.
 static mut BOOT_INFO: BootInfo = BootInfo {
     memory_regions: None,
     framebuffer: None,
 };
 
-/// Bare-metal entry point
+// ============================================================================
+// Boot Entry Point
+// ============================================================================
+
+/// Multiboot2 entry point
 ///
-/// This is called directly by the bootloader (UEFI or BIOS).
-/// For now, it uses an empty boot info and calls kernel_main.
+/// Called by the bootloader with:
+/// - EAX = Multiboot2 magic value (0x36d76289)
+/// - EBX = Physical address of Multiboot2 information structure
+///
+/// The bootloader loads us in 32-bit protected mode, so we need to:
+/// 1. Set up a minimal 64-bit environment
+/// 2. Parse Multiboot2 info
+/// 3. Jump to 64-bit kernel_main
 #[no_mangle]
+#[unsafe(naked)]
 pub extern "C" fn _start() -> ! {
-    // In a full implementation, BOOT_INFO would be populated by the bootloader
-    unsafe {
-        kernel_main(&mut BOOT_INFO)
-    }
+    // For now, we'll use a simplified entry that assumes we're already in 64-bit mode
+    // (QEMU -kernel does this for us)
+    core::arch::naked_asm!(
+        // Save Multiboot2 info pointer (in EBX)
+        "mov rdi, rbx",
+        // Call Rust entry point
+        "call {rust_entry}",
+        // Should never return, but halt just in case
+        "2:",
+        "cli",
+        "hlt",
+        "jmp 2b",
+        rust_entry = sym rust_entry,
+    )
+}
+
+/// Rust entry point called from assembly
+///
+/// Arguments:
+/// - multiboot_info_addr: Physical address of Multiboot2 info structure
+unsafe fn rust_entry(_multiboot_info_addr: u64) -> ! {
+    // TODO: Parse Multiboot2 info structure and populate BOOT_INFO
+    // For now, just use empty boot info
+    kernel_main(&mut BOOT_INFO)
 }
 
 /// Main kernel entry point
