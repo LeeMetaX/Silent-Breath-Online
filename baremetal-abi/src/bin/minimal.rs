@@ -14,10 +14,10 @@ extern crate alloc;
 
 use core::alloc::{GlobalAlloc, Layout};
 use core::fmt::Write;
-use bootloader_api::{entry_point, BootInfo};
 use i9_12900k_baremetal_abi::{
     cpu, performance, CoreType,
     coherency_runtime::CoherencyRuntime,
+    boot::BootInfo,
 };
 
 /// Dummy allocator for bare-metal (fails all allocations)
@@ -112,7 +112,25 @@ macro_rules! serial_println {
     }};
 }
 
-entry_point!(kernel_main);
+/// Static boot info
+///
+/// In a full implementation, this would be populated by the bootloader.
+static mut BOOT_INFO: BootInfo = BootInfo {
+    memory_regions: None,
+    framebuffer: None,
+};
+
+/// Bare-metal entry point
+///
+/// This is called directly by the bootloader (UEFI or BIOS).
+/// For now, it uses an empty boot info and calls kernel_main.
+#[no_mangle]
+pub extern "C" fn _start() -> ! {
+    // In a full implementation, BOOT_INFO would be populated by the bootloader
+    unsafe {
+        kernel_main(&mut BOOT_INFO)
+    }
+}
 
 /// Main kernel entry point
 fn kernel_main(boot_info: &'static mut BootInfo) -> ! {

@@ -3,7 +3,59 @@
 //! UEFI entry point, kernel initialization, and boot info
 
 use crate::cpu;
-use bootloader_api::{entry_point, BootInfo};
+
+/// Boot information structure
+///
+/// Contains information about the system state at boot time.
+/// In a full implementation, this would contain memory maps,
+/// framebuffer info, ACPI tables, etc.
+#[repr(C)]
+pub struct BootInfo {
+    /// Memory map entries (if available)
+    pub memory_regions: Option<&'static [MemoryRegion]>,
+    /// Framebuffer info (if available)
+    pub framebuffer: Option<FramebufferInfo>,
+}
+
+/// Memory region descriptor
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct MemoryRegion {
+    pub start: u64,
+    pub size: u64,
+    pub region_type: MemoryRegionType,
+}
+
+/// Memory region types
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryRegionType {
+    Usable = 1,
+    Reserved = 2,
+    AcpiReclaimable = 3,
+    AcpiNvs = 4,
+    BadMemory = 5,
+}
+
+/// Framebuffer information
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct FramebufferInfo {
+    pub addr: u64,
+    pub width: u32,
+    pub height: u32,
+    pub stride: u32,
+}
+
+impl BootInfo {
+    /// Create a default/empty boot info
+    pub const fn empty() -> Self {
+        Self {
+            memory_regions: None,
+            framebuffer: None,
+        }
+    }
+}
 
 /// Main kernel initialization function
 ///

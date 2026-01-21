@@ -10,10 +10,6 @@ silent-breath-mmio = { path = ".." }
 # Bare-metal x86-64 support
 x86_64 = { version = "0.15", default-features = false, features = ["instructions", "abi_x86_interrupt"] }
 
-# Bootloader (used by bootimage tool)
-bootloader = "0.11"
-bootloader_api = "0.11"
-
 [profile.dev]
 panic = "abort"
 

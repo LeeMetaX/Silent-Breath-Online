@@ -2,7 +2,7 @@
 //!
 //! Physical and virtual memory management
 
-use bootloader_api::BootInfo;
+use crate::boot::BootInfo;
 
 /// Physical memory layout for i9-12900K
 pub mod layout {
