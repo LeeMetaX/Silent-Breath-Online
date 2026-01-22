@@ -216,6 +216,11 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     // Suppress unused warning
     let _ = boot_info;
 
+    // Initialize serial port for output
+    unsafe {
+        SerialPort::init();
+    }
+
     serial_println!("========================================");
     serial_println!("i9-12900K Minimal Bare-Metal Kernel");
     serial_println!("ABI Version: 0.1.0");
