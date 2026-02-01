@@ -14,10 +14,18 @@ extern crate alloc;
 
 use core::alloc::{GlobalAlloc, Layout};
 use core::fmt::Write;
-use bootloader_api::{entry_point, BootInfo};
+use bootloader_api::{entry_point, BootInfo, BootloaderConfig};
+use bootloader_api::config::Mapping;
 use i9_12900k_baremetal_abi::{
     cpu, performance, CoreType,
     coherency_runtime::CoherencyRuntime,
+};
+
+const BOOTLOADER_CONFIG: BootloaderConfig = {
+    let mut config = BootloaderConfig::new_default();
+    config.mappings.physical_memory = Some(Mapping::Dynamic);
+    config.kernel_stack_size = 128 * 1024; // 128 KiB stack
+    config
 };
 
 /// Dummy allocator for bare-metal (fails all allocations)
@@ -72,12 +80,8 @@ impl SerialPort {
     fn write_byte(byte: u8) {
         unsafe {
             use core::arch::asm;
-            // Wait for transmit ready (bit 5 of line status)
-            let mut ready = 0u8;
-            while (ready & 0x20) == 0 {
-                asm!("in al, dx", out("al") ready, in("dx") Self::PORT + 5, options(nomem, nostack));
-            }
-            // Write byte
+            // Write byte directly - QEMU's virtual UART accepts writes immediately.
+            // On real hardware, add a transmit-ready wait loop here.
             asm!("out dx, al", in("dx") Self::PORT, in("al") byte, options(nomem, nostack));
         }
     }
@@ -112,41 +116,52 @@ macro_rules! serial_println {
     }};
 }
 
-entry_point!(kernel_main);
+entry_point!(kernel_main, config = &BOOTLOADER_CONFIG);
 
 /// Main kernel entry point
 fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     // Suppress unused warning
     let _ = boot_info;
 
+    // Test: write each byte of a string manually via SerialPort::write_byte
+    SerialPort::write_byte(b'H');
+    SerialPort::write_byte(b'I');
+    SerialPort::write_byte(b'\r');
+    SerialPort::write_byte(b'\n');
+
+    // Test: iterate a string literal
+    for &b in b"HELLO\r\n" {
+        SerialPort::write_byte(b);
+    }
+
     serial_println!("========================================");
     serial_println!("i9-12900K Minimal Bare-Metal Kernel");
     serial_println!("ABI Version: 0.1.0");
     serial_println!("========================================\n");
 
-    // Step 1: Initialize CPU (enable SSE/AVX)
-    serial_println!("[1/7] Initializing CPU...");
+    // Step 1: Initialize interrupts FIRST (before CPU init which may fault)
+    serial_println!("[1/7] Setting up interrupt handlers...");
+    i9_12900k_baremetal_abi::interrupts::init();
+    serial_println!("      + IDT loaded with 10 exception handlers\n");
+
+    // Step 2: Initialize CPU (enable SSE/AVX)
+    serial_println!("[2/7] Initializing CPU...");
     unsafe {
         cpu::init_cpu();
     }
-    serial_println!("      ✓ CPU initialized (SSE/AVX enabled)\n");
-
-    // Step 2: Initialize interrupts
-    serial_println!("[2/7] Setting up interrupt handlers...");
-    i9_12900k_baremetal_abi::interrupts::init();
-    serial_println!("      ✓ IDT loaded with 10 exception handlers\n");
+    serial_println!("      + CPU initialized (SSE/AVX enabled)\n");
 
     // Step 3: Detect CPU features
     serial_println!("[3/7] Detecting CPU features...");
     let features = cpu::CpuFeatures::detect();
     serial_println!("      CPU Feature Support:");
-    serial_println!("      - SSE4.2:    {}", if features.sse4_2 { "✓" } else { "✗" });
-    serial_println!("      - AVX:       {}", if features.avx { "✓" } else { "✗" });
-    serial_println!("      - AVX2:      {}", if features.avx2 { "✓" } else { "✗" });
+    serial_println!("      - SSE4.2:    {}", if features.sse4_2 { "YES" } else { "NO" });
+    serial_println!("      - AVX:       {}", if features.avx { "YES" } else { "NO" });
+    serial_println!("      - AVX2:      {}", if features.avx2 { "YES" } else { "NO" });
     serial_println!("      - AVX-512:   {}", if features.avx512f { "✓" } else { "✗ (disabled for E-core compat)" });
-    serial_println!("      - AES-NI:    {}", if features.aes { "✓" } else { "✗" });
-    serial_println!("      - RDRAND:    {}", if features.rdrand { "✓" } else { "✗" });
-    serial_println!("      - BMI2:      {}", if features.bmi2 { "✓" } else { "✗" });
+    serial_println!("      - AES-NI:    {}", if features.aes { "YES" } else { "NO" });
+    serial_println!("      - RDRAND:    {}", if features.rdrand { "YES" } else { "NO" });
+    serial_println!("      - BMI2:      {}", if features.bmi2 { "YES" } else { "NO" });
     serial_println!("");
 
     // Step 4: Detect current core type
@@ -157,21 +172,21 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
 
     match core_type {
         CoreType::Performance => {
-            serial_println!("      ✓ Running on P-CORE (Performance Core)");
+            serial_println!("      + Running on P-CORE (Performance Core)");
             serial_println!("        Architecture: Golden Cove");
             serial_println!("        Core ID: {}", core_id);
             serial_println!("        APIC ID: {}", apic_id);
             serial_println!("        Features: HyperThreading, High IPC (~5.5-6.0)");
         }
         CoreType::Efficiency => {
-            serial_println!("      ✓ Running on E-CORE (Efficiency Core)");
+            serial_println!("      + Running on E-CORE (Efficiency Core)");
             serial_println!("        Architecture: Gracemont");
             serial_println!("        Core ID: {}", core_id);
             serial_println!("        APIC ID: {}", apic_id);
             serial_println!("        Features: No HT, Power Efficient (~4.0-4.5 IPC)");
         }
         CoreType::Unknown => {
-            serial_println!("      ⚠ Unknown core type!");
+            serial_println!("      ! Unknown core type!");
         }
     }
     serial_println!("");
@@ -189,7 +204,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
             coherency.init_core(e_core);
         }
     }
-    serial_println!("      ✓ Cache coherency initialized for 16 cores");
+    serial_println!("      + Cache coherency initialized for 16 cores");
     serial_println!("        - P-cores: 0-7 (Golden Cove)");
     serial_println!("        - E-cores: 8-15 (Gracemont)");
     serial_println!("");
@@ -197,7 +212,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     // Step 6: Initialize performance monitoring
     serial_println!("[6/7] Initializing performance counters...");
     performance::init();
-    serial_println!("      ✓ Performance monitoring enabled");
+    serial_println!("      + Performance monitoring enabled");
     serial_println!("        - Fixed counters: Instructions, Cycles, Ref Cycles");
     serial_println!("        - Programmable counters: 4 available");
     serial_println!("");
