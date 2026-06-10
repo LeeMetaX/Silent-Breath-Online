@@ -10,6 +10,7 @@ pub mod cpu;
 pub mod interrupts;
 pub mod memory;
 pub mod performance;
+pub mod serial;
 
 // Re-export Silent-Breath-Online cache coherency system
 pub use silent_breath_mmio::{

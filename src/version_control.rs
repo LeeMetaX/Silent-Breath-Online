@@ -307,16 +307,18 @@ impl VersionedShadowRegister {
         Some((entry1.get_value(), entry2.get_value()))
     }
 
-    /// Get all version numbers
+    /// Get all version numbers (newest first)
     pub fn get_all_versions(&self) -> Vec<u32> {
-        let count = self.history.count();
+        // Snapshot head/count once instead of reloading them per entry
+        let count = self.history.count.load(Ordering::Acquire) as usize;
+        let head = self.history.head.load(Ordering::Acquire) as usize;
         let mut versions = Vec::with_capacity(count);
 
         for i in 0..count {
-            if let Some(entry) = self.history.get_by_offset(i) {
-                if entry.is_valid() {
-                    versions.push(entry.get_version());
-                }
+            let index = (head + MAX_VERSION_HISTORY - 1 - i) % MAX_VERSION_HISTORY;
+            let entry = &self.history.entries[index];
+            if entry.is_valid() {
+                versions.push(entry.get_version());
             }
         }
 

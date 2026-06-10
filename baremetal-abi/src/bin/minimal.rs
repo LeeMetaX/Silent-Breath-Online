@@ -13,11 +13,11 @@
 extern crate alloc;
 
 use core::alloc::{GlobalAlloc, Layout};
-use core::fmt::Write;
 use bootloader_api::{entry_point, BootInfo};
 use i9_12900k_baremetal_abi::{
-    cpu, performance, CoreType,
+    cpu, performance, serial, CoreType,
     coherency_runtime::CoherencyRuntime,
+    serial::SerialPort,
 };
 
 /// Dummy allocator for bare-metal (fails all allocations)
@@ -37,62 +37,8 @@ unsafe impl GlobalAlloc for DummyAllocator {
 #[global_allocator]
 static ALLOCATOR: DummyAllocator = DummyAllocator;
 
-/// Simple serial port driver (COM1)
-struct SerialPort;
-
-impl SerialPort {
-    const PORT: u16 = 0x3F8; // COM1
-
-    /// Initialize serial port
-    #[allow(dead_code)]
-    unsafe fn init() {
-        use core::arch::asm;
-
-        // Disable interrupts
-        asm!("out dx, al", in("dx") Self::PORT + 1, in("al") 0x00u8, options(nomem, nostack));
-
-        // Enable DLAB
-        asm!("out dx, al", in("dx") Self::PORT + 3, in("al") 0x80u8, options(nomem, nostack));
-
-        // Set divisor to 3 (38400 baud)
-        asm!("out dx, al", in("dx") Self::PORT, in("al") 0x03u8, options(nomem, nostack));
-        asm!("out dx, al", in("dx") Self::PORT + 1, in("al") 0x00u8, options(nomem, nostack));
-
-        // 8N1
-        asm!("out dx, al", in("dx") Self::PORT + 3, in("al") 0x03u8, options(nomem, nostack));
-
-        // Enable FIFO
-        asm!("out dx, al", in("dx") Self::PORT + 2, in("al") 0xC7u8, options(nomem, nostack));
-
-        // Enable IRQs, RTS/DSR
-        asm!("out dx, al", in("dx") Self::PORT + 4, in("al") 0x0Bu8, options(nomem, nostack));
-    }
-
-    /// Write a byte to serial port
-    fn write_byte(byte: u8) {
-        unsafe {
-            use core::arch::asm;
-            // Wait for transmit ready (bit 5 of line status)
-            let mut ready = 0u8;
-            while (ready & 0x20) == 0 {
-                asm!("in al, dx", out("al") ready, in("dx") Self::PORT + 5, options(nomem, nostack));
-            }
-            // Write byte
-            asm!("out dx, al", in("dx") Self::PORT, in("al") byte, options(nomem, nostack));
-        }
-    }
-}
-
-impl Write for SerialPort {
-    fn write_str(&mut self, s: &str) -> core::fmt::Result {
-        for byte in s.bytes() {
-            Self::write_byte(byte);
-        }
-        Ok(())
-    }
-}
-
-/// Serial output macro
+/// Serial output macro (COM1 driver shared with the library, see
+/// i9_12900k_baremetal_abi::serial)
 macro_rules! serial_print {
     ($($arg:tt)*) => {{
         #[cfg(not(test))]
@@ -118,6 +64,8 @@ entry_point!(kernel_main);
 fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     // Suppress unused warning
     let _ = boot_info;
+
+    serial::init();
 
     serial_println!("========================================");
     serial_println!("i9-12900K Minimal Bare-Metal Kernel");

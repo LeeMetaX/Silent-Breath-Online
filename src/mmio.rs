@@ -68,6 +68,25 @@ pub enum CoherencyOp {
     Flush = 0x4,
 }
 
+/// Maximum spin iterations to wait for the busy bit before declaring the
+/// device hung; bounds the previously infinite busy-wait loops
+pub const MMIO_SPIN_TIMEOUT: u32 = 1_000_000;
+
+/// Spin until the device clears its busy bit, failing after MMIO_SPIN_TIMEOUT
+/// iterations so a stuck busy bit cannot hang the caller forever
+#[inline]
+unsafe fn wait_while_busy(reg: &CoherencyRegister) -> Result<(), ()> {
+    let mut spins = 0u32;
+    while reg.is_busy() {
+        if spins >= MMIO_SPIN_TIMEOUT {
+            return Err(());
+        }
+        spins += 1;
+        core::hint::spin_loop();
+    }
+    Ok(())
+}
+
 /// Real-Time MMIO Accessor
 pub struct MMIOCoherency {
     reg: *mut CoherencyRegister,
@@ -91,12 +110,8 @@ impl MMIOCoherency {
         reg.write_control(ctrl);
         reg.write_address(address);
 
-        // Spin until operation completes (real-time guarantee)
-        while reg.is_busy() {
-            core::hint::spin_loop();
-        }
-
-        Ok(())
+        // Bounded spin until operation completes
+        wait_while_busy(reg)
     }
 
     /// Execute cache write via MMIO (Step 3 from your flow)
@@ -109,12 +124,8 @@ impl MMIOCoherency {
         reg.write_control(ctrl);
         reg.write_address(address);
 
-        // Spin until invalidation completes
-        while reg.is_busy() {
-            core::hint::spin_loop();
-        }
-
-        Ok(())
+        // Bounded spin until invalidation completes
+        wait_while_busy(reg)
     }
 
     /// Invalidate cache line (Step 4 from your flow)
@@ -126,12 +137,8 @@ impl MMIOCoherency {
         reg.write_control(ctrl);
         reg.write_address(address);
 
-        // Real-time spin-wait
-        while reg.is_busy() {
-            core::hint::spin_loop();
-        }
-
-        Ok(())
+        // Bounded spin-wait
+        wait_while_busy(reg)
     }
 
     /// Read current cache state from hardware
@@ -158,6 +165,19 @@ mod tests {
             status: 0,
             data: [0; 16],
         })
+    }
+
+    #[test]
+    fn test_mmio_stuck_busy_bit_times_out() {
+        let mut reg = create_mock_register();
+        reg.status = 0x1; // busy bit never clears
+
+        unsafe {
+            let mut mmio = MMIOCoherency::new(&mut *reg as *mut CoherencyRegister as usize);
+            assert!(mmio.mmio_cache_read(0, 0x1000).is_err());
+            assert!(mmio.mmio_cache_write(0, 0x1000).is_err());
+            assert!(mmio.mmio_invalidate(0, 0x1000).is_err());
+        }
     }
 
     #[test]

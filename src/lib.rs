@@ -20,7 +20,7 @@ pub mod shadow_runtime;
 // Re-export main cache coherency types
 pub use cache_coherency::{CacheLine, CacheState, L3Directory};
 pub use mmio::{CoherencyOp, MMIOCoherency};
-pub use runtime::{CoherencyRuntime, CoreCacheController};
+pub use runtime::{CoherencyRuntime, CoreCacheController, NUM_CORES};
 pub use state_machine::{CacheEvent, CoherencyStateMachine};
 
 // Re-export main shadow register types

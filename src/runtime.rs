@@ -6,6 +6,9 @@ use crate::mmio::{MMIOCoherency, COHERENCY_CTL_BASE};
 use crate::state_machine::{CacheEvent, CoherencyStateMachine};
 use alloc::boxed::Box;
 
+/// Number of cores on the i9-12900K: 8 P-cores (0-7) + 8 E-cores (8-15)
+pub const NUM_CORES: usize = 16;
+
 /// Per-Core Cache Controller
 pub struct CoreCacheController {
     core_id: u8,
@@ -17,6 +20,13 @@ pub struct CoreCacheController {
 impl CoreCacheController {
     /// Initialize core cache controller
     pub unsafe fn new(core_id: u8) -> Self {
+        // The MMIO window below is sized for NUM_CORES controllers; an
+        // out-of-range id would produce a pointer outside that window
+        assert!(
+            (core_id as usize) < NUM_CORES,
+            "core_id out of range for i9-12900K (0-15)"
+        );
+
         const INIT: CacheLine = CacheLine::new();
         Self {
             core_id,
@@ -83,21 +93,22 @@ impl CoreCacheController {
 /// Multi-Core Coherency Runtime
 /// Demonstrates the complete 5-step flow from your example
 pub struct CoherencyRuntime {
-    cores: [Option<CoreCacheController>; 8],
+    cores: [Option<CoreCacheController>; NUM_CORES],
     l3_directory: L3Directory,
 }
 
 impl CoherencyRuntime {
     pub const fn new() -> Self {
+        const NONE: Option<CoreCacheController> = None;
         Self {
-            cores: [None, None, None, None, None, None, None, None],
+            cores: [NONE; NUM_CORES],
             l3_directory: L3Directory::new(),
         }
     }
 
-    /// Initialize core
+    /// Initialize core (P-cores 0-7, E-cores 8-15)
     pub unsafe fn init_core(&mut self, core_id: u8) {
-        if (core_id as usize) < 8 {
+        if (core_id as usize) < NUM_CORES {
             self.cores[core_id as usize] = Some(CoreCacheController::new(core_id));
         }
     }
@@ -139,7 +150,7 @@ pub unsafe extern "C" fn mmio_coherency_init() -> *mut CoherencyRuntime {
     let runtime = Box::leak(Box::new(CoherencyRuntime::new()));
 
     // Initialize all cores
-    for core_id in 0..8 {
+    for core_id in 0..NUM_CORES as u8 {
         runtime.init_core(core_id);
     }
 
@@ -261,7 +272,7 @@ mod tests {
         let runtime = create_mock_runtime();
 
         // All cores should be None initially
-        for i in 0..8 {
+        for i in 0..NUM_CORES {
             assert!(runtime.cores[i].is_none());
         }
     }
@@ -275,9 +286,9 @@ mod tests {
             runtime.init_core(0);
             assert!(runtime.cores[0].is_some());
 
-            // Initialize core 7 (boundary)
-            runtime.init_core(7);
-            assert!(runtime.cores[7].is_some());
+            // Initialize core 15 (boundary, last E-core)
+            runtime.init_core(15);
+            assert!(runtime.cores[15].is_some());
 
             // Initialize core 3
             runtime.init_core(3);
@@ -294,18 +305,18 @@ mod tests {
         unsafe {
             let mut runtime = create_mock_runtime();
 
-            // Try to initialize core 8 (out of bounds)
-            runtime.init_core(8);
+            // Try to initialize core 16 (out of bounds)
+            runtime.init_core(16);
 
             // Should not panic, but should do nothing
             // All cores should still be None
-            for i in 0..8 {
+            for i in 0..NUM_CORES {
                 assert!(runtime.cores[i].is_none());
             }
 
             // Try core 255
             runtime.init_core(255);
-            for i in 0..8 {
+            for i in 0..NUM_CORES {
                 assert!(runtime.cores[i].is_none());
             }
         }
@@ -316,17 +327,34 @@ mod tests {
         unsafe {
             let mut runtime = create_mock_runtime();
 
-            // Initialize all 8 cores
-            for core_id in 0..8 {
+            // Initialize all 16 cores (8 P-cores + 8 E-cores)
+            for core_id in 0..NUM_CORES as u8 {
                 runtime.init_core(core_id);
             }
 
             // Verify all cores are initialized
-            for i in 0..8 {
+            for i in 0..NUM_CORES {
                 assert!(runtime.cores[i].is_some());
                 if let Some(ref controller) = runtime.cores[i] {
                     assert_eq!(controller.core_id, i as u8);
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn test_coherency_runtime_supports_e_cores() {
+        unsafe {
+            let mut runtime = create_mock_runtime();
+
+            // Regression: E-core initialization (ids 8-15) used to be
+            // silently dropped while boot logs claimed 16 cores
+            for e_core in 8..16 {
+                runtime.init_core(e_core);
+            }
+
+            for i in 8..16 {
+                assert!(runtime.cores[i].is_some(), "E-core {} not initialized", i);
             }
         }
     }
@@ -359,8 +387,8 @@ mod tests {
             // Should return non-null pointer
             assert!(!runtime_ptr.is_null());
 
-            // All 8 cores should be initialized
-            for i in 0..8 {
+            // All 16 cores should be initialized
+            for i in 0..NUM_CORES {
                 assert!((*runtime_ptr).cores[i].is_some());
 
                 // Verify each core has correct ID

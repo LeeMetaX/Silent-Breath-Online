@@ -92,11 +92,27 @@ impl L3Directory {
         }
     }
 
+    /// Evict the resident line if a different address aliases to this slot
+    /// (direct-mapped: distinct line addresses share an index, so the tag
+    /// must be compared before the cached state can be trusted)
+    #[inline]
+    fn evict_on_alias(line: &mut CacheLine, line_addr: u64) {
+        if line.get_state() != CacheState::Invalid && line.tag != line_addr {
+            line.force_state(CacheState::Invalid);
+            line.ref_count.store(0, Ordering::Release);
+            line.owner_core = 0xFF;
+        }
+    }
+
     /// Real-Time Traversal: Step 1 - Core 1 reads data (Shared state)
     #[inline]
     pub fn core_read(&mut self, core_id: u8, address: u64) -> Result<&[u8; 64], ()> {
-        let index = (address >> 6) % 1024;
-        let line = &self.lines[index as usize];
+        let line_addr = address >> 6;
+        let index = line_addr % 1024;
+        let line = &mut self.lines[index as usize];
+
+        Self::evict_on_alias(line, line_addr);
+        line.tag = line_addr;
 
         match line.get_state() {
             CacheState::Invalid => {
@@ -124,7 +140,11 @@ impl L3Directory {
     /// Real-Time Traversal: Step 3 - Core 1 writes (Invalidates other cores)
     #[inline]
     pub fn core_write(&mut self, core_id: u8, address: u64) -> Result<&mut [u8; 64], ()> {
-        let index = (address >> 6) % 1024;
+        let line_addr = address >> 6;
+        let index = line_addr % 1024;
+
+        Self::evict_on_alias(&mut self.lines[index as usize], line_addr);
+        self.lines[index as usize].tag = line_addr;
 
         // Get state and owner first, before mutable borrow
         let current_state = self.lines[index as usize].get_state();
@@ -255,6 +275,27 @@ mod tests {
 
         let index = (address >> 6) % 1024;
         assert_eq!(dir.lines[index as usize].get_state(), CacheState::Shared);
+    }
+
+    #[test]
+    fn test_l3_directory_aliased_addresses_do_not_share_state() {
+        let mut dir = L3Directory::new();
+
+        // Two addresses 64 KiB apart alias to the same direct-mapped index
+        let addr_a = 0x40u64;
+        let addr_b = addr_a + 1024 * 64;
+        assert_eq!((addr_a >> 6) % 1024, (addr_b >> 6) % 1024);
+
+        // Core 1 owns addr_a in Modified state
+        dir.core_write(1, addr_a).unwrap();
+        let index = ((addr_a >> 6) % 1024) as usize;
+        assert_eq!(dir.lines[index].get_state(), CacheState::Modified);
+
+        // A read of addr_b must not inherit addr_a's Modified state: the
+        // resident line is evicted and addr_b starts from Invalid -> Shared
+        dir.core_read(2, addr_b).unwrap();
+        assert_eq!(dir.lines[index].get_state(), CacheState::Shared);
+        assert_eq!(dir.lines[index].tag, addr_b >> 6);
     }
 
     #[test]

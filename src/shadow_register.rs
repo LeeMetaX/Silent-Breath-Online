@@ -34,6 +34,27 @@ impl From<u8> for RegisterState {
     }
 }
 
+/// Lookup table for the CRC32 (IEEE, reflected 0xEDB88320) byte step
+const CRC32_TABLE: [u32; 256] = {
+    let mut table = [0u32; 256];
+    let mut i = 0usize;
+    while i < 256 {
+        let mut crc = i as u32;
+        let mut bit = 0;
+        while bit < 8 {
+            if crc & 1 != 0 {
+                crc = (crc >> 1) ^ 0xEDB88320;
+            } else {
+                crc >>= 1;
+            }
+            bit += 1;
+        }
+        table[i] = crc;
+        i += 1;
+    }
+    table
+};
+
 /// Shadow Register - holds a copy of hardware fuse data
 #[repr(C, align(64))]
 pub struct ShadowRegister {
@@ -55,6 +76,8 @@ pub struct ShadowRegister {
     write_protected: bool,
     /// Backup value for rollback
     backup_value: u64,
+    /// Whether backup_value holds a real committed value
+    has_backup: bool,
 }
 
 impl ShadowRegister {
@@ -70,6 +93,7 @@ impl ShadowRegister {
             fuse_addr,
             write_protected: false,
             backup_value: 0,
+            has_backup: false,
         }
     }
 
@@ -116,6 +140,7 @@ impl ShadowRegister {
 
         // Backup current value for rollback
         self.backup_value = self.value.load(Ordering::Acquire);
+        self.has_backup = true;
 
         // Atomic commit
         let shadow_val = self.shadow_value.load(Ordering::Acquire);
@@ -134,6 +159,11 @@ impl ShadowRegister {
     /// Rollback to previous value
     #[inline]
     pub fn rollback(&mut self) -> Result<(), &'static str> {
+        // A rollback target only exists after a successful commit
+        if !self.has_backup {
+            return Err("No committed value to roll back to");
+        }
+
         // Restore backup value
         self.value.store(self.backup_value, Ordering::Release);
         self.shadow_value.store(self.backup_value, Ordering::Release);
@@ -142,8 +172,10 @@ impl ShadowRegister {
         let crc = self.calculate_crc32(self.backup_value);
         self.checksum.store(crc, Ordering::Release);
 
-        // Decrement version
-        self.version.fetch_sub(1, Ordering::AcqRel);
+        // Decrement version, saturating at 0 so it cannot wrap to u32::MAX
+        let _ = self
+            .version
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |v| v.checked_sub(1));
 
         // Update state
         self.state.store(RegisterState::Committed as u32, Ordering::Release);
@@ -187,25 +219,31 @@ impl ShadowRegister {
         self.version.load(Ordering::Acquire)
     }
 
-    /// Calculate CRC32 checksum
+    /// Calculate CRC32 checksum (table-driven; called on every commit)
     #[inline]
     fn calculate_crc32(&self, value: u64) -> u32 {
-        // Simple CRC32 implementation
         let mut crc: u32 = 0xFFFFFFFF;
-        let bytes = value.to_le_bytes();
 
-        for byte in bytes.iter() {
-            crc ^= *byte as u32;
-            for _ in 0..8 {
-                if (crc & 1) != 0 {
-                    crc = (crc >> 1) ^ 0xEDB88320;
-                } else {
-                    crc >>= 1;
-                }
-            }
+        for byte in value.to_le_bytes() {
+            let index = ((crc ^ byte as u32) & 0xFF) as usize;
+            crc = (crc >> 8) ^ CRC32_TABLE[index];
         }
 
         !crc
+    }
+
+    /// Check a candidate value against the stored checksum
+    #[inline]
+    pub fn verify_value(&self, value: u64) -> bool {
+        self.checksum.load(Ordering::Acquire) == self.calculate_crc32(value)
+    }
+
+    /// Test-only: flip bits of the active value, simulating storage corruption
+    /// without touching the stored checksum or ECC parity
+    #[cfg(test)]
+    pub(crate) fn corrupt_value_for_test(&self, mask: u64) {
+        let v = self.value.load(Ordering::Acquire);
+        self.value.store(v ^ mask, Ordering::Release);
     }
 
     /// Get fuse address
@@ -257,18 +295,27 @@ impl ShadowRegisterBank {
         self.count
     }
 
-    /// Get register by ID
-    pub fn get_register(&self, id: u32) -> Option<&ShadowRegister> {
+    /// Get the bank index holding the register with the given ID
+    pub fn index_of(&self, id: u32) -> Option<usize> {
+        // Fast path: IDs commonly match their insertion index
+        let idx = id as usize;
+        if idx < self.count && self.registers[idx].get_id() == id {
+            return Some(idx);
+        }
+
         self.registers[..self.count]
             .iter()
-            .find(|reg| reg.get_id() == id)
+            .position(|reg| reg.get_id() == id)
+    }
+
+    /// Get register by ID
+    pub fn get_register(&self, id: u32) -> Option<&ShadowRegister> {
+        self.index_of(id).map(|idx| &self.registers[idx])
     }
 
     /// Get mutable register by ID
     pub fn get_register_mut(&mut self, id: u32) -> Option<&mut ShadowRegister> {
-        self.registers[..self.count]
-            .iter_mut()
-            .find(|reg| reg.get_id() == id)
+        self.index_of(id).map(move |idx| &mut self.registers[idx])
     }
 
     /// Get register by index
@@ -310,12 +357,6 @@ impl ShadowRegisterBank {
         }
 
         Ok(committed)
-    }
-
-    /// Get count of active registers
-    #[inline(always)]
-    pub fn count(&self) -> usize {
-        self.count
     }
 }
 
@@ -386,6 +427,33 @@ mod tests {
     }
 
     #[test]
+    fn test_shadow_register_rollback_without_commit_fails() {
+        let mut reg = ShadowRegister::new(1, 0x1000);
+
+        // No commit has ever happened: rollback must not silently restore 0
+        reg.write(0x1234).unwrap();
+        assert!(reg.rollback().is_err());
+
+        // The staged write and version are untouched by the failed rollback
+        assert_eq!(reg.get_version(), 1);
+    }
+
+    #[test]
+    fn test_shadow_register_rollback_version_saturates_at_zero() {
+        let mut reg = ShadowRegister::new(1, 0x1000);
+
+        reg.write(0x1).unwrap();
+        reg.commit().unwrap();
+        assert_eq!(reg.get_version(), 1);
+
+        // First rollback brings version to 0; further rollbacks must not wrap
+        reg.rollback().unwrap();
+        assert_eq!(reg.get_version(), 0);
+        reg.rollback().unwrap();
+        assert_eq!(reg.get_version(), 0);
+    }
+
+    #[test]
     fn test_shadow_register_lock() {
         let mut reg = ShadowRegister::new(1, 0x1000);
         reg.write(0x5555).unwrap();
@@ -426,7 +494,7 @@ mod tests {
     #[test]
     fn test_shadow_register_bank_initialization() {
         let bank = ShadowRegisterBank::new();
-        assert_eq!(bank.count(), 0);
+        assert_eq!(bank.get_register_count(), 0);
     }
 
     #[test]
@@ -435,11 +503,11 @@ mod tests {
 
         // Add first register
         assert!(bank.add_register(1, 0x1000).is_ok());
-        assert_eq!(bank.count(), 1);
+        assert_eq!(bank.get_register_count(), 1);
 
         // Add second register
         assert!(bank.add_register(2, 0x2000).is_ok());
-        assert_eq!(bank.count(), 2);
+        assert_eq!(bank.get_register_count(), 2);
 
         // Check we can retrieve them
         assert!(bank.get_register(1).is_some());
