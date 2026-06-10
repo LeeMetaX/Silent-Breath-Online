@@ -511,7 +511,7 @@ mod tests {
         let shadow_bank = manager.get_shadow_bank();
 
         // Shadow bank should be empty initially
-        assert_eq!(shadow_bank.count(), 0);
+        assert_eq!(shadow_bank.get_register_count(), 0);
     }
 
     #[test]
@@ -523,6 +523,6 @@ mod tests {
         let shadow_bank = manager.get_shadow_bank();
 
         // Shadow bank should have same count as fuses
-        assert_eq!(shadow_bank.count(), 2);
+        assert_eq!(shadow_bank.get_register_count(), 2);
     }
 }

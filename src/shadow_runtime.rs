@@ -18,6 +18,8 @@ pub struct ShadowRegisterRuntime {
     sync_manager: SyncManager,
     /// ECC manager
     ecc_manager: ECCManager,
+    /// Hamming parity for each register's committed value, indexed like the bank
+    ecc_parity: [u8; 256],
     /// MMIO controller
     mmio_controller: Option<ShadowMMIOController>,
 }
@@ -30,6 +32,7 @@ impl ShadowRegisterRuntime {
             fuse_manager: FuseManager::new(),
             sync_manager: SyncManager::new(),
             ecc_manager: ECCManager::new(ECCStrategy::Hamming),
+            ecc_parity: [0; 256],
             mmio_controller: None,
         }
     }
@@ -68,42 +71,53 @@ impl ShadowRegisterRuntime {
         self.fuse_manager.commit_all()
     }
 
-    /// Read a shadow register
+    /// Read a shadow register, correcting single-bit corruption via ECC
     pub fn read(&self, register_id: u32) -> Result<u64, &'static str> {
-        if let Some(reg) = self.shadow_bank.get_register(register_id) {
-            // Verify integrity
-            if !reg.verify() {
-                return Err("Register checksum verification failed");
-            }
+        let index = self
+            .shadow_bank
+            .index_of(register_id)
+            .ok_or("Register not found")?;
+        let reg = self.shadow_bank.get_by_index(index).ok_or("Register not found")?;
 
-            Ok(reg.read())
-        } else {
-            Err("Register not found")
+        // ECC decode first: a single flipped bit is repaired here, double-bit
+        // and worse are rejected
+        let raw = reg.read();
+        let (value, _syndrome) = self.ecc_manager.decode_u64(raw, self.ecc_parity[index])?;
+
+        // Verify the (possibly corrected) value against the stored checksum
+        if !reg.verify_value(value) {
+            return Err("Register checksum verification failed");
         }
+
+        Ok(value)
     }
 
     /// Write to a shadow register
     pub fn write(&mut self, register_id: u32, value: u64) -> Result<(), &'static str> {
         if let Some(reg) = self.shadow_bank.get_register_mut(register_id) {
-            // Encode with ECC
-            let (_encoded_value, _ecc) = self.ecc_manager.encode_u64(value);
-
-            // Write to register
-            reg.write(value)?;
-
-            Ok(())
+            reg.write(value)
         } else {
             Err("Register not found")
         }
     }
 
-    /// Commit a shadow register
+    /// Commit a shadow register and record ECC parity for the committed value
     pub fn commit(&mut self, register_id: u32) -> Result<(), &'static str> {
-        if let Some(reg) = self.shadow_bank.get_register_mut(register_id) {
-            reg.commit()
-        } else {
-            Err("Register not found")
-        }
+        let index = self
+            .shadow_bank
+            .index_of(register_id)
+            .ok_or("Register not found")?;
+        let reg = self
+            .shadow_bank
+            .get_by_index_mut(index)
+            .ok_or("Register not found")?;
+
+        reg.commit()?;
+
+        let (_, parity) = self.ecc_manager.encode_u64(reg.read());
+        self.ecc_parity[index] = parity;
+
+        Ok(())
     }
 
     /// Synchronize registers with fuses
@@ -453,6 +467,47 @@ mod tests {
         let result = runtime.read(1);
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), 0x12345678);
+    }
+
+    /// Test: ECC corrects a single flipped bit in the stored value
+    #[test]
+    fn test_shadow_register_runtime_read_corrects_single_bit_flip() {
+        let mut runtime = ShadowRegisterRuntime::new();
+
+        runtime.register_fuse(1, 0x1000, FuseMode::MTP).unwrap();
+        runtime.write(1, 0xCAFE_BABE_DEAD_BEEF).unwrap();
+        runtime.commit(1).unwrap();
+
+        // Flip one bit of the committed value behind the runtime's back
+        runtime
+            .shadow_bank
+            .get_register(1)
+            .unwrap()
+            .corrupt_value_for_test(1u64 << 42);
+
+        // Read repairs the corruption and reports it in the ECC stats
+        assert_eq!(runtime.read(1).unwrap(), 0xCAFE_BABE_DEAD_BEEF);
+        let (detected, corrected) = runtime.get_ecc_stats();
+        assert_eq!(detected, 1);
+        assert_eq!(corrected, 1);
+    }
+
+    /// Test: ECC rejects double-bit corruption instead of mis-correcting
+    #[test]
+    fn test_shadow_register_runtime_read_rejects_double_bit_flip() {
+        let mut runtime = ShadowRegisterRuntime::new();
+
+        runtime.register_fuse(1, 0x1000, FuseMode::MTP).unwrap();
+        runtime.write(1, 0x1234_5678).unwrap();
+        runtime.commit(1).unwrap();
+
+        runtime
+            .shadow_bank
+            .get_register(1)
+            .unwrap()
+            .corrupt_value_for_test((1u64 << 3) | (1u64 << 57));
+
+        assert!(runtime.read(1).is_err());
     }
 
     /// Test: Read from non-existent register

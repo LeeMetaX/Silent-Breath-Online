@@ -3,6 +3,10 @@ name = "i9-12900k-baremetal-abi"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+# Route boot-path logging to the COM1 serial driver
+serial = []
+
 [dependencies]
 # Use the existing Silent-Breath-Online cache coherency system
 silent-breath-mmio = { path = ".." }

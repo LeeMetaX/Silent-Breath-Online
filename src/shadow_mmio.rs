@@ -7,9 +7,18 @@ use crate::sync_manager::{SyncDirection, SyncManager, SyncPolicy};
 use core::ptr::{read_volatile, write_volatile};
 
 /// MMIO Base Addresses for Shadow Register System
+///
+/// These are *physical* addresses. Kernels running with paging enabled must
+/// map them and use the mapped virtual address via
+/// `ShadowMMIOController::new_with_base` (e.g. baremetal-abi maps this region
+/// at its higher-half offset, see baremetal-abi/src/memory.rs SHADOW_REG_BASE).
 pub const SHADOW_REG_BASE: usize = 0x5000_0000;
 pub const FUSE_CTRL_BASE: usize = 0x5100_0000;
 pub const SYNC_CTRL_BASE: usize = 0x5200_0000;
+
+/// Maximum spin iterations to wait for command completion before declaring
+/// the device hung
+pub const MMIO_COMMAND_TIMEOUT: u32 = 1_000_000;
 
 /// Shadow Register MMIO Control Register
 #[repr(C)]
@@ -138,8 +147,13 @@ impl ShadowRegisterMMIO {
         // Write command
         self.write_control(ctrl);
 
-        // Wait for completion (spin-wait for real-time guarantee)
+        // Bounded spin-wait so a stuck busy bit cannot hang the caller
+        let mut spins = 0u32;
         while self.is_busy() {
+            if spins >= MMIO_COMMAND_TIMEOUT {
+                return Err("MMIO command timed out");
+            }
+            spins += 1;
             core::hint::spin_loop();
         }
 
@@ -165,101 +179,94 @@ pub struct ShadowMMIOController {
 }
 
 impl ShadowMMIOController {
-    /// Create a new MMIO controller
+    /// Create a new MMIO controller at the default physical base address
     pub unsafe fn new(
         shadow_bank: *mut ShadowRegisterBank,
         fuse_manager: *mut FuseManager,
     ) -> Self {
+        Self::new_with_base(SHADOW_REG_BASE, shadow_bank, fuse_manager)
+    }
+
+    /// Create a new MMIO controller at a caller-supplied base address
+    ///
+    /// Use this when the MMIO region is remapped (paging, simulation, tests).
+    /// Safety: `base` must point to a mapped ShadowRegisterMMIO block.
+    pub unsafe fn new_with_base(
+        base: usize,
+        shadow_bank: *mut ShadowRegisterBank,
+        fuse_manager: *mut FuseManager,
+    ) -> Self {
         Self {
-            mmio: SHADOW_REG_BASE as *mut ShadowRegisterMMIO,
+            mmio: base as *mut ShadowRegisterMMIO,
             shadow_bank,
             fuse_manager,
             sync_manager: SyncManager::new(),
         }
     }
 
+    /// Execute a single command against the MMIO block
+    #[inline]
+    unsafe fn exec(&mut self, command: MMIOCommand, register_id: u8) -> Result<(), &'static str> {
+        (&mut *self.mmio).execute_command(command, register_id)
+    }
+
     /// Read shadow register via MMIO
     #[inline]
     pub unsafe fn mmio_read(&mut self, register_id: u8) -> Result<u64, &'static str> {
-        let mmio = &mut *self.mmio;
-
-        // Execute read command
-        mmio.execute_command(MMIOCommand::Read, register_id)?;
-
-        // Read data from MMIO
-        Ok(mmio.read_data())
+        self.exec(MMIOCommand::Read, register_id)?;
+        Ok((&*self.mmio).read_data())
     }
 
     /// Write shadow register via MMIO
     #[inline]
     pub unsafe fn mmio_write(&mut self, register_id: u8, value: u64) -> Result<(), &'static str> {
-        let mmio = &mut *self.mmio;
-
-        // Write data to MMIO
-        mmio.write_data(value);
-
-        // Execute write command
-        mmio.execute_command(MMIOCommand::Write, register_id)?;
-
-        Ok(())
+        (&mut *self.mmio).write_data(value);
+        self.exec(MMIOCommand::Write, register_id)
     }
 
     /// Commit shadow register via MMIO
     #[inline]
     pub unsafe fn mmio_commit(&mut self, register_id: u8) -> Result<(), &'static str> {
-        let mmio = &mut *self.mmio;
-        mmio.execute_command(MMIOCommand::Commit, register_id)?;
-        Ok(())
+        self.exec(MMIOCommand::Commit, register_id)
     }
 
     /// Rollback shadow register via MMIO
     #[inline]
     pub unsafe fn mmio_rollback(&mut self, register_id: u8) -> Result<(), &'static str> {
-        let mmio = &mut *self.mmio;
-        mmio.execute_command(MMIOCommand::Rollback, register_id)?;
-        Ok(())
+        self.exec(MMIOCommand::Rollback, register_id)
     }
 
     /// Lock shadow register via MMIO
     #[inline]
     pub unsafe fn mmio_lock(&mut self, register_id: u8) -> Result<(), &'static str> {
-        let mmio = &mut *self.mmio;
-        mmio.execute_command(MMIOCommand::Lock, register_id)?;
-        Ok(())
+        self.exec(MMIOCommand::Lock, register_id)
     }
 
     /// Unlock shadow register via MMIO
     #[inline]
     pub unsafe fn mmio_unlock(&mut self, register_id: u8) -> Result<(), &'static str> {
-        let mmio = &mut *self.mmio;
-        mmio.execute_command(MMIOCommand::Unlock, register_id)?;
-        Ok(())
+        self.exec(MMIOCommand::Unlock, register_id)
     }
 
     /// Verify shadow register checksum via MMIO
     #[inline]
     pub unsafe fn mmio_verify(&mut self, register_id: u8) -> Result<bool, &'static str> {
-        let mmio = &mut *self.mmio;
-        mmio.execute_command(MMIOCommand::Verify, register_id)?;
+        self.exec(MMIOCommand::Verify, register_id)?;
 
         // Check if verification passed (error bit should be clear)
-        Ok(!mmio.has_error())
+        Ok(!(&*self.mmio).has_error())
     }
 
     /// Load from fuse via MMIO
     #[inline]
     pub unsafe fn mmio_load_fuse(&mut self, register_id: u8) -> Result<(), &'static str> {
-        let mmio = &mut *self.mmio;
-        mmio.execute_command(MMIOCommand::LoadFuse, register_id)?;
-        Ok(())
+        self.exec(MMIOCommand::LoadFuse, register_id)
     }
 
     /// Commit to fuse via MMIO
     #[inline]
     pub unsafe fn mmio_commit_fuse(&mut self, register_id: u8) -> Result<(), &'static str> {
-        let mmio = &mut *self.mmio;
-        mmio.execute_command(MMIOCommand::CommitFuse, register_id)?;
-        Ok(())
+        self.exec(MMIOCommand::CommitFuse, register_id)
     }
 
     /// Synchronize shadow register via MMIO
@@ -283,16 +290,22 @@ impl ShadowMMIOController {
         )
     }
 
-    /// Get register state via MMIO
+    /// Get the state reported by the MMIO status register
+    ///
+    /// The hardware exposes a single global status word that reflects the
+    /// most recently commanded register; there is no per-register query.
     #[inline]
-    pub unsafe fn mmio_get_state(&self, _register_id: u8) -> Result<RegisterState, &'static str> {
+    pub unsafe fn mmio_get_state(&self) -> Result<RegisterState, &'static str> {
         let mmio = &*self.mmio;
         Ok(mmio.get_state())
     }
 
-    /// Get register version via MMIO
+    /// Get the version reported by the MMIO status register
+    ///
+    /// As with `mmio_get_state`, this reflects the most recently commanded
+    /// register, not an arbitrary register ID.
     #[inline]
-    pub unsafe fn mmio_get_version(&self, _register_id: u8) -> Result<u8, &'static str> {
+    pub unsafe fn mmio_get_version(&self) -> Result<u8, &'static str> {
         let mmio = &*self.mmio;
         Ok(mmio.get_version())
     }

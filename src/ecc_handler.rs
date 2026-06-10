@@ -28,8 +28,67 @@ pub struct ECCSyndrome {
     pub error_count: u8,
 }
 
+/// Codeword position of each data bit: data bit `d` lives at the
+/// `(d+1)`-th non-power-of-two position in 1..=71. Positions 1, 2, 4, 8,
+/// 16, 32, 64 are reserved for the 7 Hamming parity bits, so a nonzero
+/// syndrome equals the codeword position of a single-bit error and parity
+/// errors are distinguishable from data errors.
+const DATA_POS: [u8; 64] = {
+    let mut tbl = [0u8; 64];
+    let mut pos = 1usize;
+    let mut d = 0usize;
+    while d < 64 {
+        if pos & (pos - 1) != 0 {
+            tbl[d] = pos as u8;
+            d += 1;
+        }
+        pos += 1;
+    }
+    tbl
+};
+
+/// Reverse mapping: codeword position -> data bit index (0xFF for parity
+/// positions and positions outside the codeword).
+const POS_TO_DATA: [u8; 128] = {
+    let mut tbl = [0xFFu8; 128];
+    let mut d = 0usize;
+    while d < 64 {
+        tbl[DATA_POS[d] as usize] = d as u8;
+        d += 1;
+    }
+    tbl
+};
+
+/// Coverage mask for Hamming parity bit `i`: data bits whose codeword
+/// position has bit `i` set. Parity is then one popcount per mask.
+const PARITY_MASKS: [u64; 7] = {
+    let mut masks = [0u64; 7];
+    let mut d = 0usize;
+    while d < 64 {
+        let pos = DATA_POS[d] as usize;
+        let mut i = 0usize;
+        while i < 7 {
+            if pos & (1 << i) != 0 {
+                masks[i] |= 1u64 << d;
+            }
+            i += 1;
+        }
+        d += 1;
+    }
+    masks
+};
+
+/// In the 8-bit parity byte, bits 0-6 are the Hamming parities and bit 7 is
+/// the overall (SECDED) parity over data and the 7 Hamming bits.
+const OVERALL_PARITY_BIT: u8 = 0x80;
+
+/// `ECCSyndrome::error_position` values at or above this denote an error in
+/// the parity byte itself (64 + parity bit index) rather than a data bit.
+pub const PARITY_ERROR_POSITION_BASE: u8 = 64;
+
 /// Hamming Code ECC Implementation
-/// Uses (72,64) Hamming code: 64 data bits + 8 parity bits
+/// Uses (72,64) SECDED Hamming code: 64 data bits + 7 Hamming parity bits
+/// + 1 overall parity bit (single-bit correct, double-bit detect)
 pub struct HammingECC {
     /// Error detection counter
     errors_detected: AtomicU32,
@@ -51,38 +110,45 @@ impl HammingECC {
     pub fn encode(&self, data: u64) -> (u64, u8) {
         let mut parity: u8 = 0;
 
-        // Calculate 8 parity bits
-        for i in 0..8 {
-            let mut bit_count = 0;
-
-            // Count bits that should contribute to this parity bit
-            for j in 0..64 {
-                // Check if bit j should be included in parity i
-                if (j & (1 << i)) != 0 {
-                    if (data >> j) & 1 == 1 {
-                        bit_count += 1;
-                    }
-                }
-            }
-
-            // Set parity bit
-            if bit_count % 2 == 1 {
+        // 7 Hamming parity bits, one popcount per coverage mask
+        for (i, mask) in PARITY_MASKS.iter().enumerate() {
+            if (data & mask).count_ones() & 1 == 1 {
                 parity |= 1 << i;
             }
+        }
+
+        // Overall parity over data + Hamming bits (SECDED)
+        if (data.count_ones() + (parity as u32).count_ones()) & 1 == 1 {
+            parity |= OVERALL_PARITY_BIT;
         }
 
         (data, parity)
     }
 
+    /// Compute the 7-bit Hamming syndrome and the overall-parity check.
+    /// Returns (syndrome, overall_mismatch): syndrome is the codeword
+    /// position of a single-bit error; overall_mismatch distinguishes
+    /// single-bit (true) from double-bit (false) errors when syndrome != 0.
+    fn syndrome(&self, data: u64, parity: u8) -> (u8, bool) {
+        let (_, calculated) = self.encode(data);
+        let syndrome = (calculated ^ parity) & 0x7F;
+
+        // Overall parity over the received codeword: data + received Hamming
+        // bits + received overall bit. Zero when intact or after an even
+        // number of flips.
+        let received_hamming = (parity & 0x7F) as u32;
+        let overall_bit = (parity >> 7) as u32;
+        let overall_mismatch =
+            (data.count_ones() + received_hamming.count_ones() + overall_bit) & 1 == 1;
+
+        (syndrome, overall_mismatch)
+    }
+
     /// Decode and correct data using Hamming ECC
     pub fn decode(&self, data: u64, parity: u8) -> Result<(u64, ECCSyndrome), &'static str> {
-        // Recalculate parity
-        let (_, calculated_parity) = self.encode(data);
+        let (syndrome, overall_mismatch) = self.syndrome(data, parity);
 
-        // XOR to get syndrome
-        let syndrome = calculated_parity ^ parity;
-
-        if syndrome == 0 {
+        if syndrome == 0 && !overall_mismatch {
             // No error
             return Ok((
                 data,
@@ -94,26 +160,42 @@ impl HammingECC {
             ));
         }
 
-        // Count number of bits set in syndrome
-        let error_count = syndrome.count_ones() as u8;
-
-        if error_count == 1 {
-            // Single-bit error in parity (detectable, no correction needed)
+        if syndrome == 0 {
+            // Only the overall parity bit itself flipped; data is intact
             self.errors_detected.fetch_add(1, Ordering::Relaxed);
 
             return Ok((
                 data,
                 ECCSyndrome {
                     error_type: ECCError::SingleBit,
-                    error_position: syndrome.trailing_zeros() as u8,
+                    error_position: PARITY_ERROR_POSITION_BASE + 7,
                     error_count: 1,
                 },
             ));
         }
 
-        // Determine error position from syndrome
-        let error_position = syndrome as u8;
+        if !overall_mismatch {
+            // Nonzero syndrome but overall parity balances: two bits flipped
+            self.errors_detected.fetch_add(1, Ordering::Relaxed);
+            return Err("Double-bit error detected - cannot correct");
+        }
 
+        // Single-bit error at codeword position `syndrome`
+        if syndrome & (syndrome - 1) == 0 {
+            // Power-of-two position: a Hamming parity bit flipped, data intact
+            self.errors_detected.fetch_add(1, Ordering::Relaxed);
+
+            return Ok((
+                data,
+                ECCSyndrome {
+                    error_type: ECCError::SingleBit,
+                    error_position: PARITY_ERROR_POSITION_BASE + syndrome.trailing_zeros() as u8,
+                    error_count: 1,
+                },
+            ));
+        }
+
+        let error_position = POS_TO_DATA[syndrome as usize];
         if error_position < 64 {
             // Single-bit error in data (correctable)
             let corrected_data = data ^ (1u64 << error_position);
@@ -131,7 +213,7 @@ impl HammingECC {
             ));
         }
 
-        // Multi-bit error (not correctable)
+        // Syndrome outside the codeword: multi-bit error (not correctable)
         self.errors_detected.fetch_add(1, Ordering::Relaxed);
 
         Err("Multi-bit error detected - cannot correct")
@@ -139,17 +221,14 @@ impl HammingECC {
 
     /// Verify data integrity without correction
     pub fn verify(&self, data: u64, parity: u8) -> ECCError {
-        let (_, calculated_parity) = self.encode(data);
-        let syndrome = calculated_parity ^ parity;
+        let (syndrome, overall_mismatch) = self.syndrome(data, parity);
 
-        if syndrome == 0 {
+        if syndrome == 0 && !overall_mismatch {
             ECCError::NoError
-        } else if syndrome.count_ones() == 1 {
+        } else if overall_mismatch {
             ECCError::SingleBit
-        } else if syndrome.count_ones() == 2 {
-            ECCError::DoubleBit
         } else {
-            ECCError::MultiBit
+            ECCError::DoubleBit
         }
     }
 
@@ -607,10 +686,84 @@ mod tests {
         let result = hamming.decode(encoded, bad_parity);
 
         // Should detect error but not be able to correct
-        if result.is_err() {
-            assert_eq!(result.unwrap_err(), "Multi-bit error detected - cannot correct");
-            let (detected, _) = hamming.get_error_stats();
+        assert!(result.is_err());
+        let (detected, corrected) = hamming.get_error_stats();
+        assert_eq!(detected, 1);
+        assert_eq!(corrected, 0);
+    }
+
+    #[test]
+    fn test_hamming_corrects_power_of_two_positions() {
+        // Regression: data-bit errors at power-of-two positions used to be
+        // misclassified as parity errors and passed through uncorrected
+        let hamming = HammingECC::new();
+
+        for bit_pos in [0, 1, 2, 4, 8, 16, 32] {
+            hamming.reset_stats();
+            let test_data = 0x96A5_3C0F_F0C3_5A69u64;
+            let (encoded, parity) = hamming.encode(test_data);
+            let corrupted_data = encoded ^ (1u64 << bit_pos);
+
+            let result = hamming.decode(corrupted_data, parity);
+            assert!(result.is_ok(), "decode failed for bit {}", bit_pos);
+            let (decoded, syndrome) = result.unwrap();
+            assert_eq!(decoded, test_data, "failed to correct bit {}", bit_pos);
+            assert_eq!(syndrome.error_type, ECCError::SingleBit);
+            assert_eq!(syndrome.error_position, bit_pos as u8);
+
+            let (detected, corrected) = hamming.get_error_stats();
             assert_eq!(detected, 1);
+            assert_eq!(corrected, 1);
         }
+    }
+
+    #[test]
+    fn test_hamming_corrects_every_data_bit() {
+        let hamming = HammingECC::new();
+
+        for bit_pos in 0..64 {
+            let test_data = 0xDEAD_BEEF_CAFE_BABEu64;
+            let (encoded, parity) = hamming.encode(test_data);
+            let corrupted_data = encoded ^ (1u64 << bit_pos);
+
+            let (decoded, _) = hamming.decode(corrupted_data, parity).unwrap();
+            assert_eq!(decoded, test_data, "failed to correct bit {}", bit_pos);
+        }
+    }
+
+    #[test]
+    fn test_hamming_parity_bit_errors_leave_data_intact() {
+        let hamming = HammingECC::new();
+        let test_data = 0x0123_4567_89AB_CDEFu64;
+        let (encoded, parity) = hamming.encode(test_data);
+
+        // Flip each of the 8 parity-byte bits in turn: data must come back
+        // unmodified, flagged as a parity-byte error
+        for parity_bit in 0..8 {
+            let corrupted_parity = parity ^ (1u8 << parity_bit);
+
+            let result = hamming.decode(encoded, corrupted_parity);
+            assert!(result.is_ok(), "decode failed for parity bit {}", parity_bit);
+            let (decoded, syndrome) = result.unwrap();
+            assert_eq!(decoded, test_data);
+            assert_eq!(syndrome.error_type, ECCError::SingleBit);
+            assert_eq!(
+                syndrome.error_position,
+                PARITY_ERROR_POSITION_BASE + parity_bit
+            );
+        }
+    }
+
+    #[test]
+    fn test_hamming_double_bit_error_detected() {
+        let hamming = HammingECC::new();
+        let test_data = 0x5A5A_5A5A_5A5A_5A5Au64;
+        let (encoded, parity) = hamming.encode(test_data);
+
+        // Flip two data bits: SECDED must refuse to "correct"
+        let corrupted_data = encoded ^ (1u64 << 3) ^ (1u64 << 47);
+
+        let result = hamming.decode(corrupted_data, parity);
+        assert!(result.is_err());
     }
 }

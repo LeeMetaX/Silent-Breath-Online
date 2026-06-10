@@ -2,8 +2,14 @@
 //!
 //! UEFI entry point, kernel initialization, and boot info
 
+use crate::coherency_runtime::CoherencyRuntime;
 use crate::cpu;
-use bootloader_api::{entry_point, BootInfo};
+use bootloader_api::BootInfo;
+
+/// Kernel-lifetime coherency runtime, initialized once during boot.
+/// Lives in BSS so the initialization in init_cache_coherency() is retained
+/// instead of being dropped at end of scope.
+static mut COHERENCY_RUNTIME: CoherencyRuntime = CoherencyRuntime::new();
 
 /// Main kernel initialization function
 ///
@@ -19,7 +25,7 @@ use bootloader_api::{entry_point, BootInfo};
 pub fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     // Initialize serial output for debugging (if available)
     #[cfg(feature = "serial")]
-    serial::init();
+    crate::serial::init();
 
     log("i9-12900K Bare-Metal Firmware ABI v0.1.0");
     log("Initializing CPU...");
@@ -70,11 +76,9 @@ pub fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
 
 /// Initialize cache coherency for hybrid architecture
 fn init_cache_coherency() {
-    use crate::coherency_runtime::CoherencyRuntime;
-
-    let mut runtime = CoherencyRuntime::new();
-
     unsafe {
+        let runtime = coherency_runtime();
+
         // Initialize P-cores (0-7)
         for p_core in 0..8 {
             runtime.init_core(p_core);
@@ -87,6 +91,16 @@ fn init_cache_coherency() {
     }
 
     log("Cache coherency initialized for 16 cores (8P+8E)");
+}
+
+/// Access the boot-initialized coherency runtime
+///
+/// # Safety
+/// The caller must guarantee exclusive access: the kernel is single-threaded
+/// during boot and the kernel loop, and the returned reference must not be
+/// held across a point where another mutable reference is created.
+pub unsafe fn coherency_runtime() -> &'static mut CoherencyRuntime {
+    &mut *core::ptr::addr_of_mut!(COHERENCY_RUNTIME)
 }
 
 /// Kernel main loop
@@ -117,7 +131,7 @@ fn kernel_loop() -> ! {
 fn log(message: &str) {
     // In a real implementation, this would write to serial port or framebuffer
     #[cfg(feature = "serial")]
-    serial::write_str(message);
+    crate::serial::write_line(message);
 
     // For now, just a no-op in release mode
     #[cfg(not(feature = "serial"))]
@@ -126,73 +140,13 @@ fn log(message: &str) {
 
 /// Formatted logging
 fn log_fmt(args: core::fmt::Arguments) {
-    use core::fmt::Write;
-
     #[cfg(feature = "serial")]
     {
-        let mut serial = serial::SerialPort;
+        use core::fmt::Write;
+        let mut serial = crate::serial::SerialPort;
         let _ = serial.write_fmt(args);
     }
 
     #[cfg(not(feature = "serial"))]
     let _ = args;
-}
-
-/// Optional serial port module for debugging
-#[cfg(feature = "serial")]
-mod serial {
-    use core::fmt;
-    use x86_64::instructions::port::Port;
-
-    const SERIAL_IO_PORT: u16 = 0x3F8; // COM1
-
-    pub struct SerialPort;
-
-    pub fn init() {
-        unsafe {
-            let mut port = Port::<u8>::new(SERIAL_IO_PORT + 1);
-            port.write(0x00); // Disable interrupts
-
-            let mut port = Port::<u8>::new(SERIAL_IO_PORT + 3);
-            port.write(0x80); // Enable DLAB
-
-            let mut port = Port::<u8>::new(SERIAL_IO_PORT);
-            port.write(0x03); // Divisor low byte (38400 baud)
-
-            let mut port = Port::<u8>::new(SERIAL_IO_PORT + 1);
-            port.write(0x00); // Divisor high byte
-
-            let mut port = Port::<u8>::new(SERIAL_IO_PORT + 3);
-            port.write(0x03); // 8N1
-
-            let mut port = Port::<u8>::new(SERIAL_IO_PORT + 2);
-            port.write(0xC7); // Enable FIFO
-
-            let mut port = Port::<u8>::new(SERIAL_IO_PORT + 4);
-            port.write(0x0B); // IRQs enabled, RTS/DSR set
-        }
-    }
-
-    pub fn write_byte(byte: u8) {
-        unsafe {
-            let mut port = Port::<u8>::new(SERIAL_IO_PORT);
-            port.write(byte);
-        }
-    }
-
-    pub fn write_str(s: &str) {
-        for byte in s.bytes() {
-            write_byte(byte);
-        }
-        write_byte(b'\n');
-    }
-
-    impl fmt::Write for SerialPort {
-        fn write_str(&mut self, s: &str) -> fmt::Result {
-            for byte in s.bytes() {
-                write_byte(byte);
-            }
-            Ok(())
-        }
-    }
 }
