@@ -1,0 +1,23 @@
+[package]
+name = "grub-stub"
+version = "0.1.0"
+edition = "2021"
+description = "Silent-Breath-Online minimal Multiboot2 kernel stub bootable by GRUB"
+
+[dependencies]
+
+[[bin]]
+name = "grub-stub"
+path = "src/main.rs"
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+opt-level = "s"
+lto = true
+codegen-units = 1
+
+# Standalone crate; not part of the parent Silent-Breath-Online workspace.
+[workspace]
